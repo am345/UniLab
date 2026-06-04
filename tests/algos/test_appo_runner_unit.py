@@ -511,21 +511,23 @@ def test_appo_runner_rollouts_per_update_caps_learner_batch(
     assert logger.collection_sync_calls == [(True, 16)]
 
     first_ring, second_ring = _FakeRolloutRingBuffer.instances
-    assert first_ring.advance_calls == 2
+    assert first_ring.advance_calls == 1
     assert second_ring.advance_calls == 1
     assert learner.last_batch is not None
     assert learner.last_batch["observations"].shape == (4, 4, 4)
     assert torch.equal(
         torch.unique(learner.last_batch["observations"]),
-        torch.tensor([2.0, 11.0]),
+        torch.tensor([1.0, 11.0]),
     )
 
     step = logger.step_calls[0]
-    assert step["extra_info"] == {"throughput_steps": 24}
-    assert step["metrics"]["rollouts_read"] == 3.0
+    assert step["extra_info"] == {"throughput_steps": 16}
+    assert step["metrics"]["rollouts_read"] == 2.0
+    assert step["metrics"]["available_on_arrive"] == 3.0
+    assert step["metrics"]["rollouts_left_in_rings"] == 1.0
     assert step["metrics"]["rollouts_per_update"] == 2.0
     assert step["metrics"]["rollouts_in_update"] == 2.0
-    assert step["metrics"]["rollouts_overwritten"] == 1.0
+    assert step["metrics"]["rollouts_overwritten"] == 0.0
     assert step["metrics"]["staging_pool_len"] == 2.0
     assert step["metrics"]["staging_pool_capacity"] == 2.0
     assert step["metrics"]["train_batch_env_steps"] == 16.0

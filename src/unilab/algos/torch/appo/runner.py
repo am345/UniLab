@@ -239,6 +239,31 @@ class APPORunner(AsyncRunner):
             time.sleep(0.001)
         return sum(buffer.available() for buffer in rollout_ring_buffers) > 0
 
+    @staticmethod
+    def _plan_rollout_reads(
+        available_by_worker: list[int],
+        *,
+        max_rollouts: int,
+    ) -> list[int]:
+        """Plan a bounded, round-robin drain across collector rings."""
+        max_rollouts = max(0, int(max_rollouts))
+        planned = [0] * len(available_by_worker)
+        remaining = [max(0, int(value)) for value in available_by_worker]
+        if max_rollouts == 0 or not remaining:
+            return planned
+
+        total_planned = 0
+        while total_planned < max_rollouts and any(value > 0 for value in remaining):
+            for worker_index, value in enumerate(remaining):
+                if value <= 0:
+                    continue
+                planned[worker_index] += 1
+                remaining[worker_index] -= 1
+                total_planned += 1
+                if total_planned >= max_rollouts:
+                    break
+        return planned
+
     def learn(
         self,
         max_iterations: int = 1500,
@@ -440,16 +465,20 @@ class APPORunner(AsyncRunner):
             available_on_arrive = sum(available_by_worker)
             wait_time = time.time() - wait_start
 
-            # Drain ALL available slots into the staging pool in one pass.
-            # This keeps the GPU busy: if the collector produced 3 rollouts while
-            # the learner was training, we consume all 3 immediately rather than
-            # processing them one-per-iteration.
+            # Drain only the rollouts that can participate in the next learner
+            # update.  Leaving excess data in the ring preserves backpressure and
+            # avoids copying rollouts into staging only to overwrite them before
+            # the learner consumes the batch.
             num_new = 0
             active_before_stage = staging_pool.active_count
             learner_incremental_h2d_time = 0.0
+            planned_reads_by_worker = self._plan_rollout_reads(
+                available_by_worker,
+                max_rollouts=self.rollouts_per_update,
+            )
             for rollout_ring_buffer, available_count in zip(
                 rollout_ring_buffers,
-                available_by_worker,
+                planned_reads_by_worker,
             ):
                 for _ in range(available_count):
                     h2d_start = time.perf_counter()
@@ -481,6 +510,7 @@ class APPORunner(AsyncRunner):
             metrics["staging_pool_capacity"] = float(staging_pool.capacity)
             metrics["available_on_arrive"] = float(available_on_arrive)
             metrics["rollouts_read"] = float(num_new)
+            metrics["rollouts_left_in_rings"] = float(max(0, available_on_arrive - num_new))
             metrics["rollouts_per_update"] = float(self.rollouts_per_update)
             metrics["rollouts_in_update"] = float(staging_pool.active_count)
             metrics["rollouts_overwritten"] = float(
