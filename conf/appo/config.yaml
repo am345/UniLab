@@ -8,6 +8,7 @@ algo:
   seed: 1
   num_envs: 2048
   num_workers: 1
+  rollouts_per_update: null
   steps_per_env: 24
   max_iterations: 150
   save_interval: 50

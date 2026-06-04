@@ -103,20 +103,32 @@ def vtrace_advantages(
         # Temporal difference errors
         deltas = clipped_rhos * (rewards + gamma * next_values * non_terminal - values)
 
-        # Backward accumulation of V-trace corrections — run on CPU numpy to avoid
-        # T sequential GPU kernel launches (one-time transfer cost is cheaper).
-        deltas_np = deltas.cpu().numpy()
-        non_terminal_np = non_terminal.cpu().numpy()
-        cs_np = cs.cpu().numpy()
-        values_np = values.cpu().numpy()
+        if values.device.type == "cpu":
+            # CPU path: numpy keeps the short reverse scan cheap without
+            # building many small torch ops.
+            deltas_np = deltas.numpy()
+            non_terminal_np = non_terminal.numpy()
+            cs_np = cs.numpy()
+            values_np = values.numpy()
 
-        vs_np = np.empty_like(values_np)
-        vs_minus_v = np.zeros(N, dtype=np.float32)
-        for t in range(T - 1, -1, -1):
-            vs_minus_v = deltas_np[t] + gamma * non_terminal_np[t] * cs_np[t] * vs_minus_v
-            vs_np[t] = values_np[t] + vs_minus_v
+            vs_np = np.empty_like(values_np)
+            vs_minus_v = np.zeros(N, dtype=np.float32)
+            for t in range(T - 1, -1, -1):
+                vs_minus_v = (
+                    deltas_np[t] + gamma * non_terminal_np[t] * cs_np[t] * vs_minus_v
+                )
+                vs_np[t] = values_np[t] + vs_minus_v
 
-        vs = torch.from_numpy(vs_np).to(device)
+            vs = torch.from_numpy(vs_np).to(device)
+        else:
+            # GPU path: keep V-trace on device.  Rollouts are short (typically
+            # 16-64 steps), so avoiding a sync-heavy CPU round trip is cheaper
+            # than transferring [T, N] values twice.
+            vs = torch.empty_like(values)
+            vs_minus_v = torch.zeros_like(bootstrap_values)
+            for t in range(T - 1, -1, -1):
+                vs_minus_v = deltas[t] + gamma * non_terminal[t] * cs[t] * vs_minus_v
+                vs[t] = values[t] + vs_minus_v
 
         # Vectorized policy gradient advantages
         next_vs = torch.cat([vs[1:], bootstrap_values.unsqueeze(0)], dim=0)

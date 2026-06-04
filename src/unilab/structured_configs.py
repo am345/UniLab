@@ -210,6 +210,7 @@ class APPOConfig(BaseConfig):
     seed: int = 1
     num_envs: int = 2048
     num_workers: int = 1
+    rollouts_per_update: int | None = None
     steps_per_env: int = 24
     max_iterations: int = 150
     save_interval: int = 50

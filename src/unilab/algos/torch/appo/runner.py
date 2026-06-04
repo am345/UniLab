@@ -61,6 +61,7 @@ class APPORunner(AsyncRunner):
         num_envs: int = 1024,
         steps_per_env: int = 24,
         num_workers: int = 1,
+        rollouts_per_update: int | None = None,
         replay_queue_size: int = 3,
         seed: int | None = None,
         resume_path: str | None = None,
@@ -82,8 +83,22 @@ class APPORunner(AsyncRunner):
             raise ValueError("APPO num_workers must be >= 1")
         if self.replay_queue_size < 1:
             raise ValueError("APPO replay_queue_size must be >= 1")
+        if rollouts_per_update is None:
+            # Preserve the historical learner batch size: all active replay slots
+            # across all workers are visible to the learner.
+            self.rollouts_per_update = self.replay_queue_size * self.num_workers
+            self._min_rollouts_for_update = self.num_workers
+        else:
+            self.rollouts_per_update = int(rollouts_per_update)
+            if self.rollouts_per_update < 1:
+                raise ValueError("APPO rollouts_per_update must be >= 1")
+            # Explicit rollouts_per_update decouples collector count from learner
+            # batch size.  Waiting for more than one rollout keeps updates from
+            # degenerating into single-worker PPO, while larger worker counts can
+            # still keep IPC queues warm.
+            self._min_rollouts_for_update = min(self.rollouts_per_update, self.num_workers)
         self.ring_num_slots = _ring_slots_from_replay_queue_size(self.replay_queue_size)
-        self.staging_pool_size = self.replay_queue_size * self.num_workers
+        self.staging_pool_size = self.rollouts_per_update
         self.seed = seed
         self.resume_path = resume_path
 
@@ -335,7 +350,7 @@ class APPORunner(AsyncRunner):
             )
 
         env_steps_per_rollout = self.steps_per_env * self.num_envs
-        env_steps_per_sync = env_steps_per_rollout * self.num_workers
+        env_steps_per_sync = env_steps_per_rollout * self._min_rollouts_for_update
 
         logger = OffPolicyLogger(
             algo_name="APPO",
@@ -352,6 +367,7 @@ class APPORunner(AsyncRunner):
             f"Waiting for first rollout... "
             f"(staging_pool={self.staging_pool_size}, "
             f"workers={self.num_workers}, "
+            f"rollouts_per_update={self.rollouts_per_update}, "
             f"epochs={learner.num_learning_epochs})"
         )
         logger_started = False
@@ -380,7 +396,7 @@ class APPORunner(AsyncRunner):
 
             data_ready = self._wait_for_rollouts(
                 rollout_ring_buffers,
-                min_ready=self.num_workers,
+                min_ready=self._min_rollouts_for_update,
                 timeout=60.0,
             )
             if not data_ready:
@@ -429,6 +445,7 @@ class APPORunner(AsyncRunner):
             # the learner was training, we consume all 3 immediately rather than
             # processing them one-per-iteration.
             num_new = 0
+            active_before_stage = staging_pool.active_count
             learner_incremental_h2d_time = 0.0
             for rollout_ring_buffer, available_count in zip(
                 rollout_ring_buffers,
@@ -464,6 +481,14 @@ class APPORunner(AsyncRunner):
             metrics["staging_pool_capacity"] = float(staging_pool.capacity)
             metrics["available_on_arrive"] = float(available_on_arrive)
             metrics["rollouts_read"] = float(num_new)
+            metrics["rollouts_per_update"] = float(self.rollouts_per_update)
+            metrics["rollouts_in_update"] = float(staging_pool.active_count)
+            metrics["rollouts_overwritten"] = float(
+                max(0, active_before_stage + num_new - staging_pool.capacity)
+            )
+            metrics["train_batch_env_steps"] = float(
+                staging_pool.active_count * env_steps_per_rollout
+            )
 
             logger.update_staging_pool(staging_pool.active_count, staging_pool.capacity)
 
