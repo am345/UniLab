@@ -98,6 +98,50 @@ def _cleanup_temp_xml(path: Path, original: Path) -> None:
         pass
 
 
+def _normalize_motrix_site_types(tree: ET.ElementTree) -> bool:
+    changed = False
+    for site in tree.getroot().iter("site"):
+        if site.get("type") != "ellipsoid":
+            continue
+        site.set("type", "sphere")
+        size = site.get("size")
+        if size:
+            values = [float(item) for item in size.split()]
+            if values:
+                site.set("size", f"{max(values):.9g}")
+        changed = True
+    return changed
+
+
+def _materialize_motrix_compatible_robot(robot_path: Path, fragment_paths: Sequence[Path]) -> Path:
+    fragment_keyframes: list[ET.Element] = []
+    for fragment_path in fragment_paths:
+        fragment_keyframes.extend(_extract_keyframes(fragment_path))
+
+    tree = ET.parse(robot_path)
+    changed = _normalize_motrix_site_types(tree)
+    if fragment_keyframes:
+        existing = tree.getroot().find("keyframe")
+        if existing is None:
+            existing = ET.SubElement(tree.getroot(), "keyframe")
+        for keyframe in fragment_keyframes:
+            existing.extend(list(keyframe))
+        changed = True
+
+    if not changed:
+        return robot_path
+
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=f"_{robot_path.name}",
+        dir=str(robot_path.parent),
+        mode="w",
+        delete=False,
+    )
+    tmp.close()
+    tree.write(tmp.name)
+    return Path(tmp.name)
+
+
 def _attach_motrix_scene_fragment(world: World, fragment_file: Path) -> None:
     import motrixsim.msd as msd
 
@@ -168,7 +212,7 @@ def materialize_motrix_scene(
     fragment_paths = [
         _resolve_scene_fragment_path(fragment_file, model_path) for fragment_file in fragment_files
     ]
-    robot_path = _materialize_robot_with_fragment_keyframes(model_path, fragment_paths)
+    robot_path = _materialize_motrix_compatible_robot(model_path, fragment_paths)
     try:
         world = msd.from_file(str(robot_path))
         for fragment_path in fragment_paths:
