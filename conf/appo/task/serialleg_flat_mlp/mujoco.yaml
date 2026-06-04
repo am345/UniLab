@@ -5,8 +5,10 @@ training:
   logger: ${oc.env:SE3_LOGGER,tensorboard}
   wandb_project: se3_wheel_leg
 algo:
-  num_envs: 1024
-  steps_per_env: 32
+  num_envs: 4096
+  num_workers: 4
+  rollouts_per_update: 4
+  steps_per_env: 16
   max_iterations: 5000
   save_interval: 100
   obs_groups:
