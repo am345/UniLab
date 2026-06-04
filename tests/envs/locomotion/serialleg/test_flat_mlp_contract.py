@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from xml.etree import ElementTree as ET
 
@@ -20,10 +21,12 @@ from unilab.envs.locomotion.serialleg.flat_mlp import (
     DEFAULT_BASE_HEIGHT,
     DEFAULT_OUTPUT_LEG_POS,
     DEFAULT_POLICY_LEG_POS,
+    FOURBAR_WHEEL_RADIUS,
     LEG_ACTION_SCALE,
     NUM_ACTIONS,
     NUM_POLICY_LEG_ACTIONS,
     OUTPUT_LEG_INDICES,
+    RESET_WHEEL_CLEARANCE,
     WHEEL_ACTION_SCALE,
     WHEEL_INDICES,
     SerialLegFlatMLPCfg,
@@ -145,6 +148,119 @@ def test_serialleg_obs_contract_uses_se3_actor_and_critic_layout() -> None:
     np.testing.assert_allclose(obs["critic"][:, 35:37], info["wheel_contact_forces"])
     np.testing.assert_allclose(obs["critic"][:, 37:38], base_pos[:, 2:3])
     assert env.obs_groups_spec == {"obs": ACTOR_OBS_DIM, "critic": CRITIC_OBS_DIM}
+
+
+def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
+    class FakePool:
+        def __init__(self, sensor_data: np.ndarray) -> None:
+            self.sensor_data = sensor_data
+
+        def forward(self, state: np.ndarray) -> np.ndarray:
+            assert state.shape == (2, 26)
+            return self.sensor_data
+
+    env = _serialleg_env_stub()
+    env._backend = SimpleNamespace(
+        _pool=FakePool(
+            np.array(
+                [
+                    [0.0, 0.0, FOURBAR_WHEEL_RADIUS - 0.005, 0.0, 0.0, 0.08],
+                    [0.0, 0.0, 0.08, 0.0, 0.0, 0.09],
+                ],
+                dtype=np.float64,
+            )
+        ),
+        _physics_state=np.zeros((2, 26), dtype=np.float64),
+        _sensor_indices={
+            "track_pos_w_l_wheel_Link": [0, 1, 2],
+            "track_pos_w_r_wheel_Link": [3, 4, 5],
+        },
+        _idx_qpos=1,
+        _idx_qvel=14,
+        nq=13,
+        nv=12,
+    )
+    qpos = np.zeros((2, 13), dtype=np.float64)
+    qpos[:, 2] = DEFAULT_BASE_HEIGHT
+    qvel = np.zeros((2, 12), dtype=np.float64)
+
+    env.align_reset_qpos_to_wheel_clearance(np.array([0, 1], dtype=np.int32), qpos, qvel)
+
+    assert qpos[0, 2] == pytest.approx(DEFAULT_BASE_HEIGHT + 0.005 + RESET_WHEEL_CLEARANCE)
+    assert qpos[1, 2] == pytest.approx(DEFAULT_BASE_HEIGHT)
+
+
+def test_serialleg_leg_dof_acc_ignores_first_two_episode_steps() -> None:
+    env = _serialleg_env_stub()
+    env._policy_leg_acc = np.full((2, NUM_POLICY_LEG_ACTIONS), 3.0, dtype=np.float32)
+    data = {"info": {"steps": np.array([1, 2], dtype=np.uint32)}}
+
+    penalty = env._reward_leg_dof_acc(data)
+
+    np.testing.assert_allclose(penalty, [0.0, 36.0])
+
+
+def test_serialleg_push_schedule_uses_se3_velocity_disturbance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    randint_calls: list[tuple[int, int]] = []
+
+    def fake_randint(low: int, high: int) -> int:
+        randint_calls.append((low, high))
+        return low
+
+    def fake_uniform(low: float, high: float, size: tuple[int, int]) -> np.ndarray:
+        assert (low, high, size) == (-1.0, 1.0, (2, 3))
+        return np.ones(size, dtype=np.float64)
+
+    monkeypatch.setattr(np.random, "randint", fake_randint)
+    monkeypatch.setattr(np.random, "uniform", fake_uniform)
+    env = _serialleg_env_stub()
+    env._backend = SimpleNamespace(_base_lin_vel_view=np.zeros((2, 3), dtype=np.float64))
+    env._next_push_step = env._sample_push_interval_steps()
+
+    assert randint_calls == [(250, 301)]
+    env.step_counter = 32 * 2000
+    env.update_push_curriculum()
+    env._next_push_step = env.step_counter
+    env.apply_velocity_push_if_due(env.step_counter)
+
+    np.testing.assert_allclose(env._backend._base_lin_vel_view, [[0.3, 0.3, 0.0], [0.3, 0.3, 0.0]])
+    assert randint_calls == [(250, 301), (250, 301)]
+    assert env._next_push_step == env.step_counter + 250
+
+
+def test_serialleg_angular_momentum_uses_robot_body_state_when_available() -> None:
+    class FakeBackend:
+        def get_body_state_w(self, body_ids: np.ndarray):
+            assert body_ids.tolist() == [0, 1]
+            pos = np.array(
+                [
+                    [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                ],
+                dtype=np.float64,
+            )
+            quat = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (2, 2, 1))
+            lin_vel = np.array(
+                [
+                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                    [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                ],
+                dtype=np.float64,
+            )
+            ang_vel = np.zeros((2, 2, 3), dtype=np.float64)
+            return pos, quat, lin_vel, ang_vel
+
+    env = _serialleg_env_stub()
+    env._backend = FakeBackend()
+    env._robot_body_ids = np.array([0, 1], dtype=np.int32)
+    env._robot_body_mass = np.array([1.0, 1.0], dtype=np.float64)
+    env._robot_body_inertia = np.zeros((2, 3), dtype=np.float64)
+
+    momentum_sq = env._robot_angular_momentum_sq(np.full((2, 3), 9.0, dtype=np.float64))
+
+    np.testing.assert_allclose(momentum_sq, [0.25, 0.0])
 
 
 def test_serialleg_hydra_owner_config_feeds_env_override() -> None:

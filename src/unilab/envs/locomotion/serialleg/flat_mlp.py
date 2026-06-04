@@ -15,12 +15,15 @@ from unilab.base.scene import SceneCfg
 from unilab.dr import DomainRandomizationCapabilities, ResetPlan, ResetRandomizationPayload
 from unilab.dr.dr_utils import (
     build_common_reset_randomization,
-    build_interval_push_plan,
-    validate_interval_push_support,
     zero_actions,
 )
 from unilab.dtype_config import get_global_dtype
-from unilab.envs.common.rotation import np_quat_apply_inverse, np_quat_mul, np_yaw_to_quat
+from unilab.envs.common.rotation import (
+    np_matrix_from_quat,
+    np_quat_apply_inverse,
+    np_quat_mul,
+    np_yaw_to_quat,
+)
 from unilab.envs.locomotion.common.base import (
     BaseNoiseConfig,
     ControlConfigBase,
@@ -56,12 +59,15 @@ NATIVE_JOINT_NAMES: tuple[str, ...] = (
 )
 OUTPUT_LEG_INDICES = np.asarray([0, 1, 3, 4], dtype=np.int32)
 WHEEL_INDICES = np.asarray([2, 5], dtype=np.int32)
+WHEEL_BODY_NAMES: tuple[str, ...] = ("l_wheel_Link", "r_wheel_Link")
 
 NUM_ACTIONS = 6
 NUM_POLICY_LEG_ACTIONS = 4
 NUM_WHEEL_ACTIONS = 2
 ACTOR_OBS_DIM = 32
 CRITIC_OBS_DIM = 38
+FOURBAR_WHEEL_RADIUS = 0.060
+RESET_WHEEL_CLEARANCE = 0.001
 
 DEFAULT_POLICY_LEG_POS = np.asarray(
     [-0.275422946189, -1.592100148957, 0.275422946189, 1.592100148957],
@@ -165,6 +171,7 @@ class SerialLegDomainRandConfig(DomainRandConfig):
     default_dof_pos_offset_range: list[float] = field(default_factory=lambda: [-0.05, 0.05])
     push_robots: bool = True
     push_interval: int = 250
+    push_interval_range_s: list[float] = field(default_factory=lambda: [5.0, 6.0])
     max_force: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.0])
     push_body_name: str | None = "base_link"
 
@@ -265,11 +272,11 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
             raise NotImplementedError(
                 f"{env._backend.backend_type} backend does not support SerialLeg reset DR: {names}"
             )
-        validate_interval_push_support(env, capabilities)
 
     def build_interval_randomization_plan(self, env: Any, step_counter: int):
         env.update_push_curriculum()
-        return build_interval_push_plan(env, step_counter)
+        env.apply_velocity_push_if_due(step_counter)
+        return None
 
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         num_reset = len(env_ids)
@@ -284,6 +291,7 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
         leg_kp, leg_kd, default_policy_leg_pos = env.sample_reset_motor_params(num_reset)
         native_joint_pos = env.policy_default_to_native_qpos(default_policy_leg_pos)
         qpos[:, 7:] = native_joint_pos
+        env.align_reset_qpos_to_wheel_clearance(env_ids, qpos, qvel)
         env.set_reset_runtime(env_ids, leg_kp, leg_kd, default_policy_leg_pos)
 
         info_updates: dict[str, Any] = {
@@ -355,6 +363,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             cfg.scene,
             num_envs,
             cfg.sim_dt,
+            add_body_sensors=True,
             base_name=cfg.asset.base_name,
             push_body_name=cfg.domain_rand.push_body_name,
             motrix_max_iterations=cfg.motrix_max_iterations,
@@ -404,6 +413,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._bad_orientation_steps = np.zeros((num_envs,), dtype=np.int32)
         self._init_action_delay_buffers(num_envs)
+        self._next_push_step = self._sample_push_interval_steps()
 
         self._base_body_mass = self._backend.get_body_mass()
         self._base_geom_friction = self._backend.get_geom_friction()
@@ -411,7 +421,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._base_body_inertia = np.asarray(
             self._backend.model.body_inertia, dtype=np.float64
         ).copy()
+        self._base_body_id = self._backend.get_body_id(cfg.asset.base_name)
+        self._robot_body_ids = self._backend.get_body_subtree_ids(self._base_body_id)
+        self._robot_body_mass = self._base_body_mass[self._robot_body_ids]
+        self._robot_body_inertia = self._base_body_inertia[self._robot_body_ids]
         self._ground_geom_id = self._backend.get_geom_id(cfg.asset.ground)
+        self._wheel_body_ids = self._backend.get_body_ids(WHEEL_BODY_NAMES)
         self._backend.set_pre_step_control(self._pre_step_motor_control)
         self._init_reward_functions()
         self._init_domain_randomization(SerialLegFlatMLPDomainRandomizationProvider())
@@ -525,6 +540,28 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
                 limit = stage_limit
         self._cfg.domain_rand.max_force = [limit, limit, 0.0]
 
+    def _sample_push_interval_steps(self) -> int:
+        low_s, high_s = self._cfg.domain_rand.push_interval_range_s
+        low_steps = max(int(round(float(low_s) / self._cfg.ctrl_dt)), 1)
+        high_steps = max(int(round(float(high_s) / self._cfg.ctrl_dt)), low_steps)
+        return int(np.random.randint(low_steps, high_steps + 1))
+
+    def apply_velocity_push_if_due(self, step_counter: int) -> None:
+        domain_rand = self._cfg.domain_rand
+        if not domain_rand.push_robots:
+            return
+        if step_counter < self._next_push_step:
+            return
+        self._next_push_step = step_counter + self._sample_push_interval_steps()
+        velocity_limit = np.asarray(domain_rand.max_force, dtype=np.float64)
+        if not np.any(velocity_limit):
+            return
+        base_lin_vel = getattr(self._backend, "_base_lin_vel_view", None)
+        if base_lin_vel is None:
+            return
+        delta = np.random.uniform(-1.0, 1.0, size=(self._num_envs, 3)) * velocity_limit
+        base_lin_vel[:] = np.asarray(base_lin_vel, dtype=np.float64) + delta
+
     def sample_reset_motor_params(
         self, num_reset: int
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -610,6 +647,50 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         native = np.zeros((output.shape[0], NUM_ACTIONS), dtype=np.float64)
         native[:, OUTPUT_LEG_INDICES] = output
         return native
+
+    def align_reset_qpos_to_wheel_clearance(
+        self, env_ids: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+    ) -> None:
+        if len(env_ids) == 0:
+            return
+        wheel_z = self._probe_reset_wheel_z(env_ids, qpos, qvel)
+        if wheel_z is None:
+            return
+        ground_z = qpos[:, 2] - DEFAULT_BASE_HEIGHT
+        wheel_bottom = wheel_z - ground_z[:, None] - FOURBAR_WHEEL_RADIUS
+        min_wheel_bottom = np.min(wheel_bottom, axis=1)
+        lift = np.clip(RESET_WHEEL_CLEARANCE - min_wheel_bottom, 0.0, None)
+        qpos[:, 2] += lift
+
+    def _probe_reset_wheel_z(
+        self, env_ids: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+    ) -> np.ndarray | None:
+        backend = self._backend
+        pool = getattr(backend, "_pool", None)
+        physics_state = getattr(backend, "_physics_state", None)
+        sensor_indices = getattr(backend, "_sensor_indices", {})
+        if pool is None or physics_state is None:
+            return None
+        idx_qpos = getattr(backend, "_idx_qpos", None)
+        idx_qvel = getattr(backend, "_idx_qvel", None)
+        nq = getattr(backend, "nq", None)
+        nv = getattr(backend, "nv", None)
+        if None in (idx_qpos, idx_qvel, nq, nv):
+            return None
+
+        wheel_sensor_cols: list[int] = []
+        for body_name in WHEEL_BODY_NAMES:
+            indices = sensor_indices.get(f"track_pos_w_{body_name}")
+            if indices is None or len(indices) < 3:
+                return None
+            wheel_sensor_cols.append(int(indices[2]))
+
+        rows = np.asarray(env_ids, dtype=np.intp)
+        probe_state = np.asarray(physics_state, dtype=np.float64).copy()
+        probe_state[rows, int(idx_qpos) : int(idx_qpos) + int(nq)] = qpos
+        probe_state[rows, int(idx_qvel) : int(idx_qvel) + int(nv)] = qvel
+        sensor_data = pool.forward(probe_state)
+        return np.asarray(sensor_data[rows[:, None], wheel_sensor_cols], dtype=np.float64)
 
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
         clipped = np.asarray(
@@ -987,8 +1068,33 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
     def _reward_angular_momentum(self, data: dict[str, Any]) -> np.ndarray:
         gate = self._upright_factor(data["projected_gravity"])
         return np.asarray(
-            np.sum(np.square(data["base_angvel"]), axis=1) * gate, dtype=get_global_dtype()
+            self._robot_angular_momentum_sq(data["base_angvel"]) * gate, dtype=get_global_dtype()
         )
+
+    def _robot_angular_momentum_sq(self, fallback_angvel: np.ndarray) -> np.ndarray:
+        body_ids = getattr(self, "_robot_body_ids", None)
+        body_mass = getattr(self, "_robot_body_mass", None)
+        body_inertia = getattr(self, "_robot_body_inertia", None)
+        if body_ids is None or body_mass is None or body_inertia is None:
+            return np.sum(np.square(fallback_angvel), axis=1)
+        try:
+            pos_w, quat_w, lin_vel_w, ang_vel_w = self._backend.get_body_state_w(body_ids)
+        except Exception:
+            return np.sum(np.square(fallback_angvel), axis=1)
+
+        mass = np.asarray(body_mass, dtype=np.float64)
+        total_mass = max(float(np.sum(mass)), 1.0e-6)
+        com_w = np.sum(pos_w * mass[None, :, None], axis=1) / total_mass
+        orbital = np.sum(
+            np.cross(pos_w - com_w[:, None, :], lin_vel_w * mass[None, :, None]), axis=1
+        )
+
+        rot = np_matrix_from_quat(quat_w.reshape(-1, 4)).reshape(*quat_w.shape[:2], 3, 3)
+        local_ang_vel = np.einsum("ebji,ebj->ebi", rot, ang_vel_w)
+        local_spin = local_ang_vel * np.asarray(body_inertia, dtype=np.float64)[None, :, :]
+        world_spin = np.einsum("ebij,ebj->ebi", rot, local_spin)
+        angular_momentum = orbital + np.sum(world_spin, axis=1)
+        return np.sum(np.square(angular_momentum), axis=1)
 
     def _reward_leg_torques(self, data: dict[str, Any]) -> np.ndarray:
         del data
@@ -1024,8 +1130,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
 
     def _reward_leg_dof_acc(self, data: dict[str, Any]) -> np.ndarray:
-        del data
-        return np.asarray(np.sum(np.square(self._policy_leg_acc), axis=1), dtype=get_global_dtype())
+        penalty = np.sum(np.square(self._policy_leg_acc), axis=1)
+        steps = np.asarray(data["info"].get("steps", np.zeros((self._num_envs,), dtype=np.uint32)))
+        penalty = np.where(steps <= 1, 0.0, penalty)
+        return np.asarray(penalty, dtype=get_global_dtype())
 
     def _reward_leg_power(self, data: dict[str, Any]) -> np.ndarray:
         del data
