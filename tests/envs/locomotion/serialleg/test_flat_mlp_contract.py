@@ -399,6 +399,7 @@ def test_serialleg_appo_motrix_owner_is_training_mainline() -> None:
     assert cfg.algo.num_envs == 2048
     assert cfg.algo.steps_per_env == 32
     assert env_cfg.motrix_max_iterations == 3
+    assert env_cfg.domain_rand.randomize_ground_friction is False
     assert env_cfg.domain_rand.randomize_body_inertia is False
     assert env_cfg.domain_rand.randomize_dof_armature is False
     assert env_cfg.domain_rand.push_robots is False
@@ -420,8 +421,49 @@ def test_serialleg_ppo_motrix_owner_is_available_for_sync_baseline() -> None:
     assert cfg.training.sim_backend == "motrix"
     assert cfg.algo.num_envs == 2048
     assert cfg.algo.num_steps_per_env == 32
+    assert env_cfg.domain_rand.randomize_ground_friction is False
     assert env_cfg.domain_rand.randomize_body_inertia is False
+    assert env_cfg.domain_rand.randomize_dof_armature is False
     assert env_cfg.domain_rand.push_robots is False
+
+
+def test_serialleg_robot_friction_ids_keep_only_contact_geoms() -> None:
+    class FakeBackend:
+        def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
+            return (
+                np.array([0, 1, 0, 2, 0], dtype=np.int32),
+                np.array([0, 0, 1, 0, 0], dtype=np.int32),
+            )
+
+    env = _serialleg_env_stub()
+    env._backend = FakeBackend()
+    env._robot_geom_ids = np.array([1, 2, 3, 4], dtype=np.int32)
+
+    np.testing.assert_array_equal(env._resolve_robot_friction_geom_ids(), [1, 2, 3])
+
+
+def test_serialleg_friction_randomization_only_changes_contact_geoms() -> None:
+    env = cast(Any, object.__new__(SerialLegFlatMLPEnv))
+    env._cfg = SerialLegFlatMLPCfg(reward_config=SerialLegRewardConfig())
+    env._base_body_mass = np.ones(1, dtype=np.float64)
+    env._base_geom_friction = np.full((5, 3), [0.8, 0.005, 0.0001], dtype=np.float64)
+    env._base_dof_armature = np.ones(1, dtype=np.float64)
+    env._base_body_inertia = np.ones((1, 3), dtype=np.float64)
+    env._base_body_id = 0
+    env._robot_geom_ids = np.array([1, 2, 3, 4], dtype=np.int32)
+    env._robot_friction_geom_ids = np.array([1, 3], dtype=np.int32)
+    env._cfg.domain_rand.randomize_base_mass = False
+    env._cfg.domain_rand.random_com = False
+    env._cfg.domain_rand.robot_friction_range = [1.4, 1.4]
+    env._cfg.domain_rand.randomize_dof_armature = False
+    env._cfg.domain_rand.randomize_body_inertia = False
+
+    payload = env._sample_startup_reset_randomization(2)
+
+    assert payload is not None
+    assert payload.geom_friction is not None
+    np.testing.assert_allclose(payload.geom_friction[:, [1, 3], 0], [[1.4, 1.4]] * 2)
+    np.testing.assert_allclose(payload.geom_friction[:, [2, 4], :], env._base_geom_friction[[2, 4]])
 
 
 def test_serialleg_backend_dr_payload_excludes_custom_policy_pd_gains() -> None:
