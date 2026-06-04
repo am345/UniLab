@@ -38,6 +38,18 @@ SIM_DT = 0.005
 _CROSS_BACKEND_ATOL = 2e-3
 
 
+def test_mujoco_nthread_config_overrides_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unilab.base.backend.mujoco import backend as mujoco_backend
+
+    monkeypatch.setattr(mujoco_backend, "cpu_count", lambda: 64)
+    monkeypatch.setenv("UNILAB_MUJOCO_NTHREAD", "12")
+
+    assert mujoco_backend._resolve_mujoco_nthread(4096, 6) == 6
+    assert mujoco_backend._resolve_mujoco_nthread(4, 6) == 4
+    assert mujoco_backend._resolve_mujoco_nthread(4096, None) == 12
+    assert mujoco_backend._resolve_mujoco_nthread(4096, "auto") == 128
+
+
 def _shape(arr: np.ndarray, *expected: int) -> None:
     assert arr.shape == expected, f"expected shape {expected}, got {arr.shape}"
 

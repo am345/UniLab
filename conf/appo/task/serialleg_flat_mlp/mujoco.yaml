@@ -52,6 +52,8 @@ algo:
     vtrace_clip_c: 1.0
     enable_compile: false
 env:
+  mujoco_backend:
+    nthread: 6
   commands:
     steps_per_policy_iter: 32
   control_config:

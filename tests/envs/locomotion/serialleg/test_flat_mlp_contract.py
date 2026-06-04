@@ -31,6 +31,7 @@ from unilab.envs.locomotion.serialleg.flat_mlp import (
     WHEEL_INDICES,
     SerialLegFlatMLPCfg,
     SerialLegFlatMLPEnv,
+    SerialLegMujocoBackendConfig,
     SerialLegRewardConfig,
 )
 from unilab.envs.locomotion.serialleg.fourbar import policy_to_output_torque_np
@@ -382,6 +383,8 @@ def test_serialleg_appo_owner_config_feeds_env_override() -> None:
     assert cfg.algo.actor.distribution_cfg.init_std == pytest.approx(0.5)
     assert cfg.algo.algorithm.learning_rate == pytest.approx(6.5e-4)
     assert isinstance(env_cfg.reward_config, SerialLegRewardConfig)
+    assert isinstance(env_cfg.mujoco_backend, SerialLegMujocoBackendConfig)
+    assert env_cfg.mujoco_backend.nthread == 6
     assert env_cfg.reward_config.scales["contact_forces"] == pytest.approx(-1.07e-3)
     assert env_cfg.control_config.min_action_delay_s == pytest.approx(0.004)
 

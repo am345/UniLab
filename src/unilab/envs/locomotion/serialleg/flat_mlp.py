@@ -229,6 +229,11 @@ class SerialLegAsset:
     ground: str = "floor"
 
 
+@dataclass
+class SerialLegMujocoBackendConfig:
+    nthread: int | str | None = None
+
+
 @registry.envcfg("SerialLegFlatMLP")
 @dataclass
 class SerialLegFlatMLPCfg(LocomotionBaseCfg):
@@ -249,6 +254,9 @@ class SerialLegFlatMLPCfg(LocomotionBaseCfg):
     domain_rand: SerialLegDomainRandConfig = field(default_factory=SerialLegDomainRandConfig)
     reward_config: SerialLegRewardConfig | None = None
     asset: SerialLegAsset = field(default_factory=SerialLegAsset)
+    mujoco_backend: SerialLegMujocoBackendConfig = field(
+        default_factory=SerialLegMujocoBackendConfig
+    )
 
 
 class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
@@ -361,6 +369,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             raise ValueError("reward_config must be provided via Hydra configuration")
         if isinstance(cfg.reward_config, dict):
             cfg.reward_config = SerialLegRewardConfig(**cfg.reward_config)
+        backend_kwargs: dict[str, Any] = {}
+        if backend_type == "mujoco":
+            backend_kwargs["nthread"] = cfg.mujoco_backend.nthread
         backend = create_backend(
             backend_type,
             cfg.scene,
@@ -371,6 +382,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             push_body_name=cfg.domain_rand.push_body_name,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
+            **backend_kwargs,
         )
         super().__init__(cfg, backend, num_envs)
         self._np_dtype = get_global_dtype()
