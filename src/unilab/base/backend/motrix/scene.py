@@ -113,6 +113,54 @@ def _normalize_motrix_site_types(tree: ET.ElementTree) -> bool:
     return changed
 
 
+def _body_contact_geom_names(root: ET.Element) -> dict[str, str]:
+    names: dict[str, str] = {}
+
+    def visit(body: ET.Element) -> None:
+        body_name = body.get("name")
+        if body_name:
+            fallback: list[str] = []
+            collision: list[str] = []
+            for geom in body.findall("geom"):
+                geom_name = geom.get("name")
+                if not geom_name:
+                    continue
+                fallback.append(geom_name)
+                contype = geom.get("contype")
+                conaffinity = geom.get("conaffinity")
+                if contype != "0" and conaffinity != "0":
+                    collision.append(geom_name)
+            if collision:
+                names[body_name] = collision[0]
+            elif fallback:
+                names[body_name] = fallback[0]
+        for child in body.findall("body"):
+            visit(child)
+
+    for body in root.findall("./worldbody/body"):
+        visit(body)
+    return names
+
+
+def _normalize_motrix_contact_sensors(tree: ET.ElementTree) -> bool:
+    root = tree.getroot()
+    body_geom_names = _body_contact_geom_names(root)
+    changed = False
+    for contact in root.findall("./sensor/contact"):
+        if contact.get("geom2") is not None:
+            continue
+        body2 = contact.get("body2")
+        if body2 is None:
+            continue
+        geom2 = body_geom_names.get(body2)
+        if geom2 is None:
+            continue
+        contact.set("geom2", geom2)
+        del contact.attrib["body2"]
+        changed = True
+    return changed
+
+
 def _materialize_motrix_compatible_robot(robot_path: Path, fragment_paths: Sequence[Path]) -> Path:
     fragment_keyframes: list[ET.Element] = []
     for fragment_path in fragment_paths:
@@ -120,6 +168,7 @@ def _materialize_motrix_compatible_robot(robot_path: Path, fragment_paths: Seque
 
     tree = ET.parse(robot_path)
     changed = _normalize_motrix_site_types(tree)
+    changed = _normalize_motrix_contact_sensors(tree) or changed
     if fragment_keyframes:
         existing = tree.getroot().find("keyframe")
         if existing is None:
