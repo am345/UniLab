@@ -13,6 +13,7 @@ define which algorithm and backend combinations are runnable.
 - G1 motion tracking: `g1_motion_tracking`, `g1_flip_tracking`,
   `g1_wall_flip_tracking`, `g1_climb_tracking`, `g1_box_tracking`
 - Go2 arm: `go2_arm_manip_loco`
+- SerialLeg: `serialleg_flat_mlp` ({doc}`5-serialleg_flat_mlp`)
 
 ## Examples
 
@@ -22,6 +23,7 @@ uv run train --algo ppo --task go2_joystick_rough --sim motrix training.no_play=
 uv run train --algo ppo --task go2_footstand --sim mujoco training.no_play=true
 uv run train --algo appo --task g1_motion_tracking --sim mujoco training.no_play=true
 uv run train --algo sac --task g1_walk_flat --sim mujoco
+uv run train --algo appo --task serialleg_flat_mlp --sim motrix training.no_play=true
 ```
 
 Check the support matrix for evidence grade by entrypoint, task owner, and

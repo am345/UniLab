@@ -12,6 +12,12 @@ owner YAMLs under `conf/` and summarized in {doc}`../../5-reference/5-support_ma
 Go1, Go2, Go2W, and G1 walking owners.
 :::
 
+:::{grid-item-card} SerialLeg Flat-MLP
+:link: 5-serialleg_flat_mlp
+:link-type: doc
+SerialLeg flat-ground base policy with Motrix training and MuJoCo validation.
+:::
+
 :::{grid-item-card} Motion tracking
 :link: 2-motion_tracking
 :link-type: doc
@@ -39,4 +45,5 @@ Go2 plus Airbot arm locomotion and manipulation.
 2-motion_tracking
 3-manipulation
 4-manip_loco
+5-serialleg_flat_mlp
 ```

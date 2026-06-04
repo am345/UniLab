@@ -463,7 +463,8 @@ def test_serialleg_friction_randomization_only_changes_contact_geoms() -> None:
     assert payload is not None
     assert payload.geom_friction is not None
     np.testing.assert_allclose(payload.geom_friction[:, [1, 3], 0], [[1.4, 1.4]] * 2)
-    np.testing.assert_allclose(payload.geom_friction[:, [2, 4], :], env._base_geom_friction[[2, 4]])
+    expected_unchanged = np.broadcast_to(env._base_geom_friction[[2, 4]], (2, 2, 3))
+    np.testing.assert_allclose(payload.geom_friction[:, [2, 4], :], expected_unchanged)
 
 
 def test_serialleg_backend_dr_payload_excludes_custom_policy_pd_gains() -> None:

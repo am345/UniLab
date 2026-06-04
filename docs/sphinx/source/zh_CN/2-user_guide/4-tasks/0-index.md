@@ -6,6 +6,12 @@
 ::::{grid} 1 1 2 2
 :gutter: 3
 
+:::{grid-item-card} SerialLeg Flat-MLP
+:link: 5-serialleg_flat_mlp
+:link-type: doc
+SerialLeg 平地基模，使用 Motrix 训练、MuJoCo 验证。
+:::
+
 :::{grid-item-card} 运动控制
 :link: 1-locomotion
 :link-type: doc
@@ -39,4 +45,5 @@ Go2 加 Airbot 机械臂的运动控制与操作。
 2-motion_tracking
 3-manipulation
 4-manip_loco
+5-serialleg_flat_mlp
 ```
