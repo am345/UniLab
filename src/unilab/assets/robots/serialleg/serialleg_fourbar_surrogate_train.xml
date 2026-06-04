@@ -108,13 +108,13 @@
     <velocimeter name="local_linvel" site="imu" />
     <framezaxis name="upvector" objtype="site" objname="imu" />
     <subtreeangmom name="robot_subtree_angmom" body="base_link" />
-    <touch name="base_contact" site="base_contact_site" />
-    <touch name="l_wheel_contact" site="l_wheel_contact_site" />
-    <touch name="r_wheel_contact" site="r_wheel_contact_site" />
-    <touch name="lf0_contact" site="lf0_contact_site" />
-    <touch name="lf1_contact" site="lf1_contact_site" />
-    <touch name="rf0_contact" site="rf0_contact_site" />
-    <touch name="rf1_contact" site="rf1_contact_site" />
+    <contact name="base_contact" geom1="floor" body2="base_link" num="1" data="force" reduce="netforce" />
+    <contact name="l_wheel_contact" geom1="floor" body2="l_wheel_Link" num="1" data="force" reduce="netforce" />
+    <contact name="r_wheel_contact" geom1="floor" body2="r_wheel_Link" num="1" data="force" reduce="netforce" />
+    <contact name="lf0_contact" geom1="floor" body2="lf0_Link" num="1" data="force" reduce="netforce" />
+    <contact name="lf1_contact" geom1="floor" body2="lf1_Link" num="1" data="force" reduce="netforce" />
+    <contact name="rf0_contact" geom1="floor" body2="rf0_Link" num="1" data="force" reduce="netforce" />
+    <contact name="rf1_contact" geom1="floor" body2="rf1_Link" num="1" data="force" reduce="netforce" />
   </sensor>
   <keyframe>
     <key name="home" qpos="0 0 0.22 1 0 0 0 -0.275422946189 -1.242259649307 0 0.275422946189 1.242259649307 0" />

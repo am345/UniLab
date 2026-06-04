@@ -1245,7 +1245,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             values = np.asarray(self._backend.get_sensor_data(name), dtype=get_global_dtype())
         except KeyError:
             return np.zeros((self._num_envs,), dtype=get_global_dtype())
-        return values.reshape(values.shape[0], -1)[:, 0]
+        flat = values.reshape(values.shape[0], -1)
+        if flat.shape[1] >= 3:
+            return np.asarray(np.linalg.norm(flat[:, :3], axis=1), dtype=get_global_dtype())
+        return flat[:, 0]
 
     def _clamp_active_rod_angles(self, leg_target: np.ndarray) -> np.ndarray:
         target = np.asarray(leg_target, dtype=np.float64).copy()

@@ -277,6 +277,18 @@ def test_serialleg_angular_momentum_prefers_mujoco_subtree_sensor() -> None:
     np.testing.assert_allclose(momentum_sq, [9.0, 25.0])
 
 
+def test_serialleg_contact_sensor_reader_uses_netforce_magnitude() -> None:
+    class FakeBackend:
+        def get_sensor_data(self, name: str) -> np.ndarray:
+            assert name == "l_wheel_contact"
+            return np.array([[3.0, 4.0, 0.0], [0.0, 0.0, 12.0]], dtype=np.float64)
+
+    env = _serialleg_env_stub()
+    env._backend = FakeBackend()
+
+    np.testing.assert_allclose(env._sensor_scalar("l_wheel_contact"), [5.0, 12.0])
+
+
 def test_serialleg_hydra_owner_config_feeds_env_override() -> None:
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
@@ -296,6 +308,27 @@ def test_serialleg_hydra_owner_config_feeds_env_override() -> None:
     assert env_cfg.reward_config.scales["tracking_lin_vel"] == pytest.approx(4.0)
     assert env_cfg.reward_config.scales["upright_leg_contact"] == pytest.approx(-25.0)
     assert env_cfg.control_config.action_delay_enabled is True
+
+
+def test_serialleg_appo_owner_config_feeds_env_override() -> None:
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONF_DIR / "appo"), version_base="1.3"):
+        cfg = compose("config", overrides=["task=serialleg_flat_mlp/mujoco"])
+
+    adapter = BackendAdapter(cfg, root_dir=ROOT_DIR, algo_name="appo")
+    env_cfg_override = adapter.build_task_env_cfg_override()
+    env_cfg = SerialLegFlatMLPCfg()
+    apply_cfg_overrides(env_cfg, env_cfg_override)
+
+    assert cfg.training.task_name == "SerialLegFlatMLP"
+    assert cfg.training.sim_backend == "mujoco"
+    assert cfg.algo.steps_per_env == 32
+    assert cfg.algo.actor.hidden_dims == [512, 256, 128]
+    assert cfg.algo.actor.distribution_cfg.init_std == pytest.approx(0.5)
+    assert cfg.algo.algorithm.learning_rate == pytest.approx(6.5e-4)
+    assert isinstance(env_cfg.reward_config, SerialLegRewardConfig)
+    assert env_cfg.reward_config.scales["contact_forces"] == pytest.approx(-1.07e-3)
+    assert env_cfg.control_config.min_action_delay_s == pytest.approx(0.004)
 
 
 def test_serialleg_backend_dr_payload_excludes_custom_policy_pd_gains() -> None:
@@ -334,6 +367,23 @@ def test_serialleg_cli_routes_to_ppo_mujoco_owner_config() -> None:
     ]
 
 
+def test_serialleg_cli_routes_to_appo_mujoco_owner_config() -> None:
+    command = cli.build_command(
+        mode="train",
+        algo="appo",
+        task="serialleg_flat_mlp",
+        sim="mujoco",
+        overrides=["training.no_play=true"],
+        root=ROOT_DIR,
+    )
+
+    assert command[1:] == [
+        str(ROOT_DIR / "scripts" / "train_appo.py"),
+        "task=serialleg_flat_mlp/mujoco",
+        "training.no_play=true",
+    ]
+
+
 def test_serialleg_xml_keeps_policy_order_sensor_contract() -> None:
     root = ET.parse(XML_PATH).getroot()
     actuators = [
@@ -343,6 +393,11 @@ def test_serialleg_xml_keeps_policy_order_sensor_contract() -> None:
     ]
     sensors = {
         sensor.attrib["name"] for sensor in root.find("sensor") or [] if "name" in sensor.attrib
+    }
+    contact_sensors = {
+        sensor.attrib["name"]: sensor.attrib
+        for sensor in root.find("sensor") or []
+        if sensor.tag == "contact" and "name" in sensor.attrib
     }
 
     assert actuators == [
@@ -366,3 +421,16 @@ def test_serialleg_xml_keeps_policy_order_sensor_contract() -> None:
         "rf0_contact",
         "rf1_contact",
     }.issubset(sensors)
+    for name in (
+        "base_contact",
+        "l_wheel_contact",
+        "r_wheel_contact",
+        "lf0_contact",
+        "lf1_contact",
+        "rf0_contact",
+        "rf1_contact",
+    ):
+        sensor = contact_sensors[name]
+        assert sensor["geom1"] == "floor"
+        assert sensor["data"] == "force"
+        assert sensor["reduce"] == "netforce"
