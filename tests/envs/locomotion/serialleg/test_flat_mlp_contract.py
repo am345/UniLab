@@ -58,13 +58,13 @@ def _serialleg_env_stub() -> Any:
     return env
 
 
-def test_serialleg_flat_mlp_registers_mujoco_backend() -> None:
+def test_serialleg_flat_mlp_registers_mujoco_and_motrix_backends() -> None:
     import unilab.envs.locomotion.serialleg  # noqa: F401
 
     assert registry.contains("SerialLegFlatMLP")
     registered = registry.list_registered_envs()["SerialLegFlatMLP"]
     assert registered["config_class"] == "SerialLegFlatMLPCfg"
-    assert registered["available_backends"] == ["mujoco"]
+    assert registered["available_backends"] == ["mujoco", "motrix"]
 
 
 def test_serialleg_flat_mlp_config_matches_se3_flat_mlp_contract() -> None:
@@ -383,6 +383,47 @@ def test_serialleg_appo_owner_config_feeds_env_override() -> None:
     assert env_cfg.control_config.min_action_delay_s == pytest.approx(0.004)
 
 
+def test_serialleg_appo_motrix_owner_is_training_mainline() -> None:
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONF_DIR / "appo"), version_base="1.3"):
+        cfg = compose("config", overrides=["task=serialleg_flat_mlp/motrix"])
+
+    adapter = BackendAdapter(cfg, root_dir=ROOT_DIR, algo_name="appo")
+    env_cfg_override = adapter.build_task_env_cfg_override()
+    env_cfg = SerialLegFlatMLPCfg()
+    apply_cfg_overrides(env_cfg, env_cfg_override)
+
+    assert cfg.training.task_name == "SerialLegFlatMLP"
+    assert cfg.training.sim_backend == "motrix"
+    assert cfg.algo.num_workers == 2
+    assert cfg.algo.num_envs == 2048
+    assert cfg.algo.steps_per_env == 32
+    assert env_cfg.motrix_max_iterations == 3
+    assert env_cfg.domain_rand.randomize_body_inertia is False
+    assert env_cfg.domain_rand.randomize_dof_armature is False
+    assert env_cfg.domain_rand.push_robots is False
+    assert isinstance(env_cfg.reward_config, SerialLegRewardConfig)
+    assert env_cfg.reward_config.scales["tracking_lin_vel"] == pytest.approx(4.0)
+
+
+def test_serialleg_ppo_motrix_owner_is_available_for_sync_baseline() -> None:
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
+        cfg = compose("config", overrides=["task=serialleg_flat_mlp/motrix"])
+
+    adapter = BackendAdapter(cfg, root_dir=ROOT_DIR)
+    env_cfg_override = adapter.build_task_env_cfg_override()
+    env_cfg = SerialLegFlatMLPCfg()
+    apply_cfg_overrides(env_cfg, env_cfg_override)
+
+    assert cfg.training.task_name == "SerialLegFlatMLP"
+    assert cfg.training.sim_backend == "motrix"
+    assert cfg.algo.num_envs == 2048
+    assert cfg.algo.num_steps_per_env == 32
+    assert env_cfg.domain_rand.randomize_body_inertia is False
+    assert env_cfg.domain_rand.push_robots is False
+
+
 def test_serialleg_backend_dr_payload_excludes_custom_policy_pd_gains() -> None:
     env = cast(Any, object.__new__(SerialLegFlatMLPEnv))
     env._cfg = SerialLegFlatMLPCfg(reward_config=SerialLegRewardConfig())
@@ -481,6 +522,25 @@ def test_serialleg_cli_routes_to_ppo_mujoco_owner_config() -> None:
     ]
 
 
+def test_serialleg_cli_routes_to_ppo_motrix_owner_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "find_spec", lambda name: object() if name == "motrixsim" else None)
+
+    command = cli.build_command(
+        mode="train",
+        algo="ppo",
+        task="serialleg_flat_mlp",
+        sim="motrix",
+        overrides=["training.no_play=true"],
+        root=ROOT_DIR,
+    )
+
+    assert command[1:] == [
+        str(ROOT_DIR / "scripts" / "train_rsl_rl.py"),
+        "task=serialleg_flat_mlp/motrix",
+        "training.no_play=true",
+    ]
+
+
 def test_serialleg_cli_routes_to_appo_mujoco_owner_config() -> None:
     command = cli.build_command(
         mode="train",
@@ -494,6 +554,25 @@ def test_serialleg_cli_routes_to_appo_mujoco_owner_config() -> None:
     assert command[1:] == [
         str(ROOT_DIR / "scripts" / "train_appo.py"),
         "task=serialleg_flat_mlp/mujoco",
+        "training.no_play=true",
+    ]
+
+
+def test_serialleg_cli_routes_to_appo_motrix_owner_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "find_spec", lambda name: object() if name == "motrixsim" else None)
+
+    command = cli.build_command(
+        mode="train",
+        algo="appo",
+        task="serialleg_flat_mlp",
+        sim="motrix",
+        overrides=["training.no_play=true"],
+        root=ROOT_DIR,
+    )
+
+    assert command[1:] == [
+        str(ROOT_DIR / "scripts" / "train_appo.py"),
+        "task=serialleg_flat_mlp/motrix",
         "training.no_play=true",
     ]
 
