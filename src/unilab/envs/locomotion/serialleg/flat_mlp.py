@@ -352,6 +352,7 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
 
 
 @registry.env("SerialLegFlatMLP", sim_backend="mujoco")
+@registry.env("SerialLegFlatMLP", sim_backend="motrix")
 class SerialLegFlatMLPEnv(LocomotionBaseEnv):
     _cfg: SerialLegFlatMLPCfg
 
@@ -418,15 +419,17 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._next_push_step = self._sample_push_interval_steps()
 
         self._base_body_mass = self._backend.get_body_mass()
-        self._base_geom_friction = self._backend.get_geom_friction()
-        self._base_dof_armature = self._backend.get_dof_armature()
-        self._base_body_inertia = np.asarray(
-            self._backend.model.body_inertia, dtype=np.float64
-        ).copy()
+        self._base_geom_friction = self._resolve_base_geom_friction()
+        self._base_dof_armature = self._resolve_base_dof_armature()
+        self._base_body_inertia = self._resolve_base_body_inertia()
         self._base_body_id = self._backend.get_body_id(cfg.asset.base_name)
         self._robot_body_ids = self._backend.get_body_subtree_ids(self._base_body_id)
         self._robot_body_mass = self._base_body_mass[self._robot_body_ids]
-        self._robot_body_inertia = self._base_body_inertia[self._robot_body_ids]
+        self._robot_body_inertia = (
+            None
+            if self._base_body_inertia is None
+            else self._base_body_inertia[self._robot_body_ids]
+        )
         self._ground_geom_id = self._backend.get_geom_id(cfg.asset.ground)
         geom_body_ids = self._backend.get_geom_body_ids()
         self._robot_geom_ids = np.flatnonzero(np.isin(geom_body_ids, self._robot_body_ids)).astype(
@@ -490,6 +493,32 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         if seconds <= 0.0:
             return 0
         return max(int(round(float(seconds) / self._cfg.sim_dt)), 1)
+
+    def _resolve_base_geom_friction(self) -> np.ndarray:
+        try:
+            return np.asarray(self._backend.get_geom_friction(), dtype=np.float64).copy()
+        except NotImplementedError:
+            if self._cfg.domain_rand.randomize_ground_friction:
+                raise
+            return np.zeros((0, 3), dtype=np.float64)
+
+    def _resolve_base_dof_armature(self) -> np.ndarray:
+        try:
+            return np.asarray(self._backend.get_dof_armature(), dtype=np.float64).copy()
+        except NotImplementedError:
+            if self._cfg.domain_rand.randomize_dof_armature:
+                raise
+            return np.zeros((self._backend.num_dof_vel,), dtype=np.float64)
+
+    def _resolve_base_body_inertia(self) -> np.ndarray | None:
+        body_inertia = getattr(self._backend.model, "body_inertia", None)
+        if body_inertia is not None:
+            return np.asarray(body_inertia, dtype=np.float64).copy()
+        if self._cfg.domain_rand.randomize_body_inertia:
+            raise NotImplementedError(
+                f"{self._backend.backend_type} backend does not expose body inertia"
+            )
+        return None
 
     def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
         env_ids = np.asarray(env_indices, dtype=np.int32)
@@ -633,6 +662,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             domain_rand.randomize_kp = original_randomize_kp
             domain_rand.randomize_kd = original_randomize_kd
         if domain_rand.randomize_body_inertia:
+            if self._base_body_inertia is None:
+                raise NotImplementedError(
+                    f"{self._backend.backend_type} backend does not expose body inertia"
+                )
             if payload is None:
                 payload = ResetRandomizationPayload()
             inertia = np.broadcast_to(
@@ -690,6 +723,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             payload.dof_armature = dof_armature
 
         if domain_rand.randomize_body_inertia:
+            if self._base_body_inertia is None:
+                raise NotImplementedError(
+                    f"{self._backend.backend_type} backend does not expose body inertia"
+                )
             inertia = np.broadcast_to(
                 self._base_body_inertia, (num_envs, *self._base_body_inertia.shape)
             ).copy()

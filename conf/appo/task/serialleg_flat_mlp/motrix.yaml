@@ -1,0 +1,109 @@
+# @package _global_
+training:
+  task_name: SerialLegFlatMLP
+  sim_backend: motrix
+  logger: ${oc.env:SE3_LOGGER,tensorboard}
+  wandb_project: se3_wheel_leg
+algo:
+  num_envs: 2048
+  num_workers: 2
+  steps_per_env: 32
+  max_iterations: 5000
+  save_interval: 100
+  obs_groups:
+    actor:
+      policy: 0
+    critic:
+      policy: 0
+  actor:
+    class_name: rsl_rl.models.MLPModel
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    obs_normalization: true
+    distribution_cfg:
+      class_name: rsl_rl.modules.distribution.GaussianDistribution
+      init_std: 0.5
+      std_type: scalar
+  critic:
+    class_name: rsl_rl.models.MLPModel
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    obs_normalization: true
+  algorithm:
+    value_loss_coef: 1.0
+    use_clipped_value_loss: true
+    clip_param: 0.167
+    entropy_coef: 0.00516
+    num_learning_epochs: 7
+    num_mini_batches: 4
+    learning_rate: 6.5e-4
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    max_grad_norm: 1.0
+    adaptive_kl_factor: 1.2
+    adaptive_lr_factor: 1.1
+    optimizer: adam
+    tau: 1.0
+    target_update_freq: 1
+    vtrace_clip_rho: 1.0
+    vtrace_clip_c: 1.0
+    enable_compile: false
+env:
+  motrix_max_iterations: 3
+  commands:
+    steps_per_policy_iter: 32
+  domain_rand:
+    randomize_body_inertia: false
+    randomize_dof_armature: false
+    push_robots: false
+  control_config:
+    clip_actions: 1.0
+    leg_kp: 40.0
+    leg_kd: 2.0
+    wheel_kd: 0.5
+    action_delay_enabled: true
+    action_delay_s: 0.005
+    randomize_action_delay: true
+    min_action_delay_s: 0.004
+    max_action_delay_s: 0.006
+reward:
+  scales:
+    tracking_lin_vel: 4.0
+    tracking_ang_vel: 1.73
+    tracking_orientation_l2: -12.0
+    tracking_height: 2.49
+    bad_tilt: -6.0
+    ang_vel_xy: -0.146
+    angular_momentum: -5.0e-5
+    leg_torques: -2.0e-4
+    wheel_torques: -1.0e-4
+    stand_still: -1.0
+    leg_dof_acc: -2.17e-7
+    leg_power: -1.03e-4
+    action_rate: -0.48
+    joint_mirror: -0.179
+    dof_pos_limits: -5.0
+    collision: -16.0
+    contact_forces: -1.07e-3
+    upright_wheel_contact: -10.0
+    upright_leg_contact: -25.0
+    is_alive: 1.0
+  tracking_lin_vel_sigma_move: 0.08
+  tracking_lin_vel_sigma_stand: 0.1
+  tracking_lin_vel_vz_weight: 2.0
+  tracking_ang_vel_sigma: 0.25
+  tracking_height_sigma: 0.05
+  bad_tilt_soft_limit_deg: 10.0
+  bad_tilt_hard_limit_deg: 30.0
+  bad_tilt_max_penalty: 4.0
+  wheel_torques_max_torque: 3.0
+  stand_still_command_threshold: 0.1
+  stand_still_default_height: 0.22
+  stand_still_height_tolerance: 40.0
+  contact_forces_threshold: 35.0
+  collision_threshold: 0.1
+  upright_contact_force_threshold: 1.0
+  upright_contact_min_gate: 0.35
+  only_positive_rewards: false
