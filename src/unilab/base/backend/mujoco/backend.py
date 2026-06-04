@@ -183,6 +183,20 @@ def _remove_temp_xml(path: str) -> None:
         os.remove(path)
 
 
+def _resolve_mujoco_nthread(num_envs: int) -> int:
+    raw = os.environ.get("UNILAB_MUJOCO_NTHREAD")
+    if raw is None or raw.strip() == "" or raw.strip().lower() == "auto":
+        return min(num_envs, cpu_count() * 2)
+
+    try:
+        nthread = int(raw)
+    except ValueError as exc:
+        raise ValueError("UNILAB_MUJOCO_NTHREAD 必须是正整数或 auto") from exc
+    if nthread <= 0:
+        raise ValueError("UNILAB_MUJOCO_NTHREAD 必须大于 0")
+    return min(num_envs, nthread)
+
+
 class _TempXmlCleanup:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -314,7 +328,7 @@ class MuJoCoBackend(SimBackend):
         self._pending_xfrc_applied = np.zeros((num_envs, 6 * self._model.nbody), dtype=np.float64)
 
         # 线程配置
-        self._n_threads = min(num_envs, cpu_count() * 2)
+        self._n_threads = _resolve_mujoco_nthread(num_envs)
 
         self._model_variants: tuple[mujoco.MjModel, ...] = (self._model,)
         self._model_assignments = np.zeros((num_envs,), dtype=np.int32)
