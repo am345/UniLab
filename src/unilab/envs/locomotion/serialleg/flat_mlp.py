@@ -93,6 +93,7 @@ DEFAULT_BASE_HEIGHT = 0.22
 LEG_ACTION_SCALE = np.asarray([0.35, 0.25, 0.35, 0.25], dtype=np.float64)
 WHEEL_ACTION_SCALE = 45.0
 COMMAND_SCALE = np.asarray([2.0, 0.25, 5.0, 5.0, 5.0], dtype=np.float64)
+CONTACT_FORCE_MAX_N = 5000.0
 DM8009P_STALL_TORQUE = 40.0
 DM8009P_NO_LOAD_SPEED = 160.0 * 2.0 * math.pi / 60.0
 DM8009P_RATED_TORQUE = 20.0
@@ -116,7 +117,7 @@ class SerialLegNoiseConfig(BaseNoiseConfig):
 
 @dataclass
 class SerialLegControlConfig(ControlConfigBase):
-    clip_actions: float = 1.0
+    clip_actions: float | None = None
     leg_kp: float = 40.0
     leg_kd: float = 2.0
     wheel_kd: float = 0.5
@@ -159,7 +160,8 @@ class SerialLegDomainRandConfig(DomainRandConfig):
     com_offset_x: list[float] = field(default_factory=lambda: [-0.05, 0.05])
     com_offset_y: list[float] = field(default_factory=lambda: [-0.05, 0.05])
     com_offset_z: list[float] = field(default_factory=lambda: [-0.05, 0.05])
-    randomize_dof_armature: bool = True
+    robot_friction_range: list[float] = field(default_factory=lambda: [0.2, 1.5])
+    randomize_dof_armature: bool = False
     dof_armature_multiplier_range: list[float] = field(default_factory=lambda: [0.8, 1.2])
     randomize_body_inertia: bool = True
     body_inertia_multiplier_range: list[float] = field(default_factory=lambda: [0.8, 1.2])
@@ -261,7 +263,7 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
         )
 
     def validate(self, env: Any, capabilities: DomainRandomizationCapabilities) -> None:
-        payload = env.build_reset_randomization(num_reset=1)
+        payload = env.build_reset_randomization(np.asarray([0], dtype=np.int32))
         unsupported = (
             frozenset()
             if payload is None
@@ -288,7 +290,7 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
         qpos[:, 0:3] = env._spawn.apply_spawn(env_ids, qpos[:, 0:3], yaw=yaw)
         qvel[:, :] = 0.0
 
-        leg_kp, leg_kd, default_policy_leg_pos = env.sample_reset_motor_params(num_reset)
+        leg_kp, leg_kd, default_policy_leg_pos = env.sample_reset_motor_params(env_ids)
         native_joint_pos = env.policy_default_to_native_qpos(default_policy_leg_pos)
         qpos[:, 7:] = native_joint_pos
         env.align_reset_qpos_to_wheel_clearance(env_ids, qpos, qvel)
@@ -318,7 +320,7 @@ class SerialLegFlatMLPDomainRandomizationProvider(LocomotionDRProvider):
             qpos=qpos,
             qvel=qvel,
             info_updates=info_updates,
-            randomization=env.build_reset_randomization(num_reset),
+            randomization=env.build_reset_randomization(env_ids),
         )
 
     def _compute_reset_obs(
@@ -426,7 +428,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._robot_body_mass = self._base_body_mass[self._robot_body_ids]
         self._robot_body_inertia = self._base_body_inertia[self._robot_body_ids]
         self._ground_geom_id = self._backend.get_geom_id(cfg.asset.ground)
+        geom_body_ids = self._backend.get_geom_body_ids()
+        self._robot_geom_ids = np.flatnonzero(np.isin(geom_body_ids, self._robot_body_ids)).astype(
+            np.int32
+        )
         self._wheel_body_ids = self._backend.get_body_ids(WHEEL_BODY_NAMES)
+        self._init_startup_randomization()
         self._backend.set_pre_step_control(self._pre_step_motor_control)
         self._init_reward_functions()
         self._init_domain_randomization(SerialLegFlatMLPDomainRandomizationProvider())
@@ -436,9 +443,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         return {"obs": ACTOR_OBS_DIM, "critic": CRITIC_OBS_DIM}
 
     def _init_action_space(self) -> None:
+        clip_actions = self._cfg.control_config.clip_actions
+        low = -np.inf if clip_actions is None else -float(clip_actions)
+        high = np.inf if clip_actions is None else float(clip_actions)
         self._action_space = gym.spaces.Box(
-            low=-1.0,
-            high=1.0,
+            low=low,
+            high=high,
             shape=(NUM_ACTIONS,),
             dtype=np.float32,
         )
@@ -505,10 +515,11 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
         commands[np.abs(commands[:, 0]) < self._cfg.commands.vx_deadband, 0] = 0.0
         commands[np.abs(commands[:, 1]) < self._cfg.commands.yaw_deadband, 1] = 0.0
-        standing_prob = float(self._cfg.commands.rel_standing_envs)
-        if standing_prob > 0.0:
-            standing = np.random.uniform(size=(num_reset,)) < min(standing_prob, 1.0)
-            commands[standing, 0:2] = 0.0
+        standing_count = int(
+            num_reset * max(0.0, min(float(self._cfg.commands.rel_standing_envs), 1.0))
+        )
+        if standing_count > 0:
+            commands[:standing_count, 0:4] = 0.0
         return commands
 
     def current_command_limits(self) -> tuple[float, float]:
@@ -562,18 +573,29 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         delta = np.random.uniform(-1.0, 1.0, size=(self._num_envs, 3)) * velocity_limit
         base_lin_vel[:] = np.asarray(base_lin_vel, dtype=np.float64) + delta
 
-    def sample_reset_motor_params(
-        self, num_reset: int
+    def _init_startup_randomization(self) -> None:
+        (
+            self._startup_leg_kp,
+            self._startup_leg_kd,
+            self._startup_default_policy_leg_pos,
+        ) = self._sample_startup_motor_params(self._num_envs)
+        self._leg_kp[:] = self._startup_leg_kp
+        self._leg_kd[:] = self._startup_leg_kd
+        self._default_policy_leg_pos[:] = self._startup_default_policy_leg_pos
+        self._startup_reset_randomization = self._sample_startup_reset_randomization(self._num_envs)
+
+    def _sample_startup_motor_params(
+        self, num_envs: int
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         domain_rand = self._cfg.domain_rand
-        kp = np.broadcast_to(self._base_leg_kp, (num_reset, NUM_POLICY_LEG_ACTIONS)).copy()
-        kd = np.broadcast_to(self._base_leg_kd, (num_reset, NUM_POLICY_LEG_ACTIONS)).copy()
+        kp = np.broadcast_to(self._base_leg_kp, (num_envs, NUM_POLICY_LEG_ACTIONS)).copy()
+        kd = np.broadcast_to(self._base_leg_kd, (num_envs, NUM_POLICY_LEG_ACTIONS)).copy()
         if domain_rand.randomize_kp:
-            kp *= np.random.uniform(*domain_rand.kp_multiplier_range, size=(num_reset, 1))
+            kp *= np.random.uniform(*domain_rand.kp_multiplier_range, size=(num_envs, 1))
         if domain_rand.randomize_kd:
-            kd *= np.random.uniform(*domain_rand.kd_multiplier_range, size=(num_reset, 1))
+            kd *= np.random.uniform(*domain_rand.kd_multiplier_range, size=(num_envs, 1))
         default_pos = np.broadcast_to(
-            DEFAULT_POLICY_LEG_POS, (num_reset, NUM_POLICY_LEG_ACTIONS)
+            DEFAULT_POLICY_LEG_POS, (num_envs, NUM_POLICY_LEG_ACTIONS)
         ).copy()
         if domain_rand.randomize_default_dof_pos:
             low, high = domain_rand.default_dof_pos_offset_range
@@ -581,7 +603,17 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             default_pos = self._clamp_active_rod_angles(default_pos)
         return kp, kd, default_pos
 
-    def build_reset_randomization(self, num_reset: int) -> ResetRandomizationPayload | None:
+    def sample_reset_motor_params(
+        self, env_ids: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        rows = np.asarray(env_ids, dtype=np.intp)
+        return (
+            self._startup_leg_kp[rows].copy(),
+            self._startup_leg_kd[rows].copy(),
+            self._startup_default_policy_leg_pos[rows].copy(),
+        )
+
+    def _legacy_build_reset_randomization(self, num_reset: int) -> ResetRandomizationPayload | None:
         domain_rand = self._cfg.domain_rand
         original_randomize_kp = domain_rand.randomize_kp
         original_randomize_kd = domain_rand.randomize_kd
@@ -613,6 +645,86 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             )
             payload.body_inertia = inertia
         return None if payload is None or payload.is_empty() else payload
+
+    def _sample_startup_reset_randomization(
+        self, num_envs: int
+    ) -> ResetRandomizationPayload | None:
+        domain_rand = self._cfg.domain_rand
+        payload = ResetRandomizationPayload()
+
+        if domain_rand.randomize_base_mass:
+            low, high = domain_rand.added_mass_range
+            payload.base_mass_delta = np.random.uniform(low, high, size=(num_envs,))
+
+        if domain_rand.random_com:
+            base_com_offset = np.zeros((num_envs, 3), dtype=np.float64)
+            low, high = domain_rand.com_offset_x
+            base_com_offset[:, 0] = np.random.uniform(low, high, size=(num_envs,))
+            low, high = domain_rand.com_offset_y
+            base_com_offset[:, 1] = np.random.uniform(low, high, size=(num_envs,))
+            low, high = domain_rand.com_offset_z
+            base_com_offset[:, 2] = np.random.uniform(low, high, size=(num_envs,))
+            payload.base_com_offset = base_com_offset
+
+        if domain_rand.randomize_ground_friction:
+            geom_friction = np.broadcast_to(
+                self._base_geom_friction, (num_envs, *self._base_geom_friction.shape)
+            ).copy()
+            robot_geom_ids = np.asarray(self._robot_geom_ids, dtype=np.intp)
+            if robot_geom_ids.size:
+                low, high = domain_rand.robot_friction_range
+                geom_friction[:, robot_geom_ids, 0] = np.random.uniform(
+                    low, high, size=(num_envs, 1)
+                )
+            payload.geom_friction = geom_friction
+
+        if domain_rand.randomize_dof_armature:
+            dof_armature = np.broadcast_to(
+                self._base_dof_armature, (num_envs, self._base_dof_armature.size)
+            ).copy()
+            randomized = self._base_dof_armature > 0.0
+            low, high = domain_rand.dof_armature_multiplier_range
+            dof_armature[:, randomized] *= np.random.uniform(
+                low, high, size=(num_envs, int(np.count_nonzero(randomized)))
+            )
+            payload.dof_armature = dof_armature
+
+        if domain_rand.randomize_body_inertia:
+            inertia = np.broadcast_to(
+                self._base_body_inertia, (num_envs, *self._base_body_inertia.shape)
+            ).copy()
+            low, high = domain_rand.body_inertia_multiplier_range
+            inertia[:, self._base_body_id, :] = self._base_body_inertia[
+                self._base_body_id
+            ] * np.random.uniform(low, high, size=(num_envs, 3))
+            payload.body_inertia = inertia
+
+        return None if payload.is_empty() else payload
+
+    def build_reset_randomization(self, env_ids: np.ndarray) -> ResetRandomizationPayload | None:
+        payload = self._startup_reset_randomization
+        if payload is None or payload.is_empty():
+            return None
+        rows = np.asarray(env_ids, dtype=np.intp)
+        sliced = ResetRandomizationPayload(
+            base_mass_delta=self._slice_reset_field(payload.base_mass_delta, rows),
+            base_com_offset=self._slice_reset_field(payload.base_com_offset, rows),
+            gravity=self._slice_reset_field(payload.gravity, rows),
+            body_iquat=self._slice_reset_field(payload.body_iquat, rows),
+            body_inertia=self._slice_reset_field(payload.body_inertia, rows),
+            body_ipos=self._slice_reset_field(payload.body_ipos, rows),
+            body_mass=self._slice_reset_field(payload.body_mass, rows),
+            dof_armature=self._slice_reset_field(payload.dof_armature, rows),
+            geom_friction=self._slice_reset_field(payload.geom_friction, rows),
+            kp=None,
+            kd=None,
+        )
+        return None if sliced.is_empty() else sliced
+
+    def _slice_reset_field(self, value: np.ndarray | None, rows: np.ndarray) -> np.ndarray | None:
+        if value is None:
+            return None
+        return np.asarray(value[rows], dtype=np.float64).copy()
 
     def set_reset_runtime(
         self,
@@ -693,17 +805,15 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         return np.asarray(sensor_data[rows[:, None], wheel_sensor_cols], dtype=np.float64)
 
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
-        clipped = np.asarray(
-            np.clip(
-                actions,
-                -self._cfg.control_config.clip_actions,
-                self._cfg.control_config.clip_actions,
-            ),
-            dtype=self._np_dtype,
-        )
-        state.info["last_actions"] = state.info.get("current_actions", np.zeros_like(clipped))
-        state.info["current_actions"] = clipped
-        return clipped
+        action = np.asarray(actions, dtype=self._np_dtype)
+        clip_actions = self._cfg.control_config.clip_actions
+        if clip_actions is not None:
+            action = np.asarray(
+                np.clip(action, -float(clip_actions), float(clip_actions)), dtype=self._np_dtype
+            )
+        state.info["last_actions"] = state.info.get("current_actions", np.zeros_like(action))
+        state.info["current_actions"] = action
+        return action
 
     def _pre_step_motor_control(self, backend: Any, policy_ctrl: np.ndarray) -> np.ndarray:
         delayed = self._select_delayed_actions(policy_ctrl)
@@ -1247,8 +1357,18 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             return np.zeros((self._num_envs,), dtype=get_global_dtype())
         flat = values.reshape(values.shape[0], -1)
         if flat.shape[1] >= 3:
-            return np.asarray(np.linalg.norm(flat[:, :3], axis=1), dtype=get_global_dtype())
-        return flat[:, 0]
+            force_mag = np.linalg.norm(flat[:, :3], axis=1)
+            return self._finite_contact_force(force_mag)
+        return self._finite_contact_force(flat[:, 0])
+
+    def _finite_contact_force(self, force: np.ndarray) -> np.ndarray:
+        finite = np.nan_to_num(
+            np.asarray(force, dtype=np.float64),
+            nan=CONTACT_FORCE_MAX_N,
+            posinf=CONTACT_FORCE_MAX_N,
+            neginf=0.0,
+        )
+        return np.asarray(np.clip(finite, 0.0, CONTACT_FORCE_MAX_N), dtype=get_global_dtype())
 
     def _clamp_active_rod_angles(self, leg_target: np.ndarray) -> np.ndarray:
         target = np.asarray(leg_target, dtype=np.float64).copy()

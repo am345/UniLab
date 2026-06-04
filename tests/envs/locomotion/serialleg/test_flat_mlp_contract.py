@@ -53,6 +53,7 @@ def _serialleg_env_stub() -> Any:
     env = cast(Any, object.__new__(SerialLegFlatMLPEnv))
     env._cfg = SerialLegFlatMLPCfg(reward_config=SerialLegRewardConfig())
     env._num_envs = 2
+    env._np_dtype = np.float32
     env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)).copy()
     return env
 
@@ -84,8 +85,11 @@ def test_serialleg_flat_mlp_config_matches_se3_flat_mlp_contract() -> None:
     assert cfg.control_config.leg_kp == pytest.approx(40.0)
     assert cfg.control_config.leg_kd == pytest.approx(2.0)
     assert cfg.control_config.wheel_kd == pytest.approx(0.5)
+    assert cfg.control_config.clip_actions is None
     assert cfg.control_config.min_action_delay_s == pytest.approx(0.004)
     assert cfg.control_config.max_action_delay_s == pytest.approx(0.006)
+    assert cfg.domain_rand.randomize_dof_armature is False
+    assert cfg.domain_rand.robot_friction_range == [0.2, 1.5]
     np.testing.assert_allclose(LEG_ACTION_SCALE, [0.35, 0.25, 0.35, 0.25])
     assert WHEEL_ACTION_SCALE == pytest.approx(45.0)
     np.testing.assert_allclose(COMMAND_SCALE, [2.0, 0.25, 5.0, 5.0, 5.0])
@@ -281,12 +285,60 @@ def test_serialleg_contact_sensor_reader_uses_netforce_magnitude() -> None:
     class FakeBackend:
         def get_sensor_data(self, name: str) -> np.ndarray:
             assert name == "l_wheel_contact"
-            return np.array([[3.0, 4.0, 0.0], [0.0, 0.0, 12.0]], dtype=np.float64)
+            return np.array(
+                [[3.0, 4.0, 0.0], [np.nan, 0.0, 0.0], [np.inf, 0.0, 0.0]],
+                dtype=np.float64,
+            )
 
     env = _serialleg_env_stub()
+    env._num_envs = 3
     env._backend = FakeBackend()
 
-    np.testing.assert_allclose(env._sensor_scalar("l_wheel_contact"), [5.0, 12.0])
+    np.testing.assert_allclose(env._sensor_scalar("l_wheel_contact"), [5.0, 5000.0, 5000.0])
+
+
+def test_serialleg_sample_commands_matches_se3_standing_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_uniform(low: float, high: float, size: tuple[int, ...]) -> np.ndarray:
+        del low, high
+        return np.full(size, 0.25, dtype=np.float64)
+
+    monkeypatch.setattr(np.random, "uniform", fake_uniform)
+    env = _serialleg_env_stub()
+    env.step_counter = 32 * 5000
+    env._cfg.commands.rel_standing_envs = 0.5
+    env._cfg.commands.vx_deadband = 0.0
+    env._cfg.commands.yaw_deadband = 0.0
+
+    commands = env.sample_commands(5)
+
+    np.testing.assert_allclose(commands[:2, :4], 0.0)
+    np.testing.assert_allclose(commands[:2, 4], 0.25)
+    np.testing.assert_allclose(commands[2:, :4], 0.25)
+
+
+def test_serialleg_default_action_path_keeps_se3_unclipped_actions() -> None:
+    env = _serialleg_env_stub()
+    state = SimpleNamespace(
+        info={
+            "current_actions": np.ones((2, NUM_ACTIONS), dtype=np.float32),
+        }
+    )
+    actions = np.array(
+        [[2.5, -2.0, 0.5, -0.5, 1.25, -1.25], [-1.5, 1.5, 0.0, 0.0, 2.0, -2.0]],
+        dtype=np.float32,
+    )
+
+    out = env.apply_action(actions, cast(Any, state))
+
+    np.testing.assert_allclose(out, actions)
+    np.testing.assert_allclose(state.info["current_actions"], actions)
+    np.testing.assert_allclose(state.info["last_actions"], np.ones((2, NUM_ACTIONS)))
+
+    env._cfg.control_config.clip_actions = 1.0
+    clipped = env.apply_action(actions, cast(Any, state))
+    np.testing.assert_allclose(clipped, np.clip(actions, -1.0, 1.0))
 
 
 def test_serialleg_hydra_owner_config_feeds_env_override() -> None:
@@ -340,14 +392,76 @@ def test_serialleg_backend_dr_payload_excludes_custom_policy_pd_gains() -> None:
     env._ground_geom_id = 0
     env._base_dof_armature = np.ones(12, dtype=np.float64)
     env._base_body_inertia = np.ones((3, 3), dtype=np.float64)
+    env._base_body_id = 1
+    env._robot_geom_ids = np.array([0], dtype=np.int32)
+    env._startup_reset_randomization = env._sample_startup_reset_randomization(2)
 
-    payload = env.build_reset_randomization(num_reset=2)
+    payload = env.build_reset_randomization(np.array([0, 1], dtype=np.int32))
 
     assert payload is not None
     assert RESET_TERM_KP not in payload.requested_terms()
     assert RESET_TERM_KD not in payload.requested_terms()
     assert env._cfg.domain_rand.randomize_kp is True
     assert env._cfg.domain_rand.randomize_kd is True
+
+
+def test_serialleg_startup_randomization_is_reused_across_resets() -> None:
+    env = cast(Any, object.__new__(SerialLegFlatMLPEnv))
+    env._cfg = SerialLegFlatMLPCfg(reward_config=SerialLegRewardConfig())
+    env._num_envs = 3
+    env._num_action = NUM_ACTIONS
+    env._base_leg_kp = np.full((NUM_POLICY_LEG_ACTIONS,), 40.0, dtype=np.float64)
+    env._base_leg_kd = np.full((NUM_POLICY_LEG_ACTIONS,), 2.0, dtype=np.float64)
+    env._leg_kp = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float64)
+    env._leg_kd = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float64)
+    env._default_policy_leg_pos = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float64)
+    env._base_body_mass = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    env._base_geom_friction = np.array(
+        [[0.8, 0.005, 0.0001], [0.7, 0.005, 0.0001], [0.6, 0.005, 0.0001]],
+        dtype=np.float64,
+    )
+    env._base_dof_armature = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    env._base_body_inertia = np.ones((3, 3), dtype=np.float64)
+    env._base_body_id = 1
+    env._robot_geom_ids = np.array([1, 2], dtype=np.int32)
+    env._cfg.domain_rand.added_mass_range = [1.0, 1.0]
+    env._cfg.domain_rand.com_offset_x = [0.01, 0.01]
+    env._cfg.domain_rand.com_offset_y = [0.02, 0.02]
+    env._cfg.domain_rand.com_offset_z = [0.03, 0.03]
+    env._cfg.domain_rand.robot_friction_range = [1.4, 1.4]
+    env._cfg.domain_rand.randomize_dof_armature = True
+    env._cfg.domain_rand.dof_armature_multiplier_range = [1.5, 1.5]
+    env._cfg.domain_rand.body_inertia_multiplier_range = [1.2, 1.2]
+    env._cfg.domain_rand.kp_multiplier_range = [1.1, 1.1]
+    env._cfg.domain_rand.kd_multiplier_range = [0.9, 0.9]
+    env._cfg.domain_rand.default_dof_pos_offset_range = [0.02, 0.02]
+
+    env._init_startup_randomization()
+    env_ids = np.array([0, 2], dtype=np.int32)
+    payload_a = env.build_reset_randomization(env_ids)
+    payload_b = env.build_reset_randomization(env_ids)
+    leg_kp_a, leg_kd_a, default_a = env.sample_reset_motor_params(env_ids)
+    leg_kp_b, leg_kd_b, default_b = env.sample_reset_motor_params(env_ids)
+
+    assert payload_a is not None
+    assert payload_b is not None
+    np.testing.assert_allclose(payload_a.base_mass_delta, payload_b.base_mass_delta)
+    np.testing.assert_allclose(payload_a.base_com_offset, payload_b.base_com_offset)
+    np.testing.assert_allclose(payload_a.geom_friction, payload_b.geom_friction)
+    np.testing.assert_allclose(payload_a.dof_armature, payload_b.dof_armature)
+    np.testing.assert_allclose(payload_a.body_inertia, payload_b.body_inertia)
+    np.testing.assert_allclose(leg_kp_a, leg_kp_b)
+    np.testing.assert_allclose(leg_kd_a, leg_kd_b)
+    np.testing.assert_allclose(default_a, default_b)
+    np.testing.assert_allclose(leg_kp_a, 44.0)
+    np.testing.assert_allclose(leg_kd_a, 1.8)
+    np.testing.assert_allclose(default_a, np.tile(DEFAULT_POLICY_LEG_POS + 0.02, (2, 1)))
+    np.testing.assert_allclose(payload_a.base_mass_delta, [1.0, 1.0])
+    np.testing.assert_allclose(payload_a.base_com_offset, [[0.01, 0.02, 0.03]] * 2)
+    np.testing.assert_allclose(payload_a.geom_friction[:, [1, 2], 0], [[1.4, 1.4]] * 2)
+    np.testing.assert_allclose(payload_a.dof_armature, [[0.0, 1.5, 3.0]] * 2)
+    np.testing.assert_allclose(payload_a.body_inertia[:, 1, :], 1.2)
+    np.testing.assert_allclose(payload_a.body_inertia[:, [0, 2], :], 1.0)
 
 
 def test_serialleg_cli_routes_to_ppo_mujoco_owner_config() -> None:
