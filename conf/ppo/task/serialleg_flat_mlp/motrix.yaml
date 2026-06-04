@@ -36,6 +36,7 @@ env:
   commands:
     steps_per_policy_iter: 32
   domain_rand:
+    randomize_ground_friction: false
     randomize_body_inertia: false
     randomize_dof_armature: false
     push_robots: false

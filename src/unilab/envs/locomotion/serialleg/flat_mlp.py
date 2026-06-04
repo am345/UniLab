@@ -435,6 +435,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._robot_geom_ids = np.flatnonzero(np.isin(geom_body_ids, self._robot_body_ids)).astype(
             np.int32
         )
+        self._robot_friction_geom_ids = self._resolve_robot_friction_geom_ids()
         self._wheel_body_ids = self._backend.get_body_ids(WHEEL_BODY_NAMES)
         self._init_startup_randomization()
         self._backend.set_pre_step_control(self._pre_step_motor_control)
@@ -519,6 +520,20 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
                 f"{self._backend.backend_type} backend does not expose body inertia"
             )
         return None
+
+    def _resolve_robot_friction_geom_ids(self) -> np.ndarray:
+        robot_geom_ids = np.asarray(self._robot_geom_ids, dtype=np.int32)
+        try:
+            contype, conaffinity = self._backend.get_geom_contact_masks()
+        except NotImplementedError:
+            return robot_geom_ids
+        contact_geom_ids = np.flatnonzero(
+            (np.asarray(contype, dtype=np.int32) != 0)
+            | (np.asarray(conaffinity, dtype=np.int32) != 0)
+        ).astype(np.int32)
+        return np.intersect1d(robot_geom_ids, contact_geom_ids, assume_unique=False).astype(
+            np.int32
+        )
 
     def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
         env_ids = np.asarray(env_indices, dtype=np.int32)
@@ -703,7 +718,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             geom_friction = np.broadcast_to(
                 self._base_geom_friction, (num_envs, *self._base_geom_friction.shape)
             ).copy()
-            robot_geom_ids = np.asarray(self._robot_geom_ids, dtype=np.intp)
+            robot_geom_ids = np.asarray(
+                getattr(self, "_robot_friction_geom_ids", self._robot_geom_ids), dtype=np.intp
+            )
             if robot_geom_ids.size:
                 low, high = domain_rand.robot_friction_range
                 geom_friction[:, robot_geom_ids, 0] = np.random.uniform(
