@@ -89,14 +89,18 @@ class RolloutRingBuffer:
         self._write_ptr = write_ptr
         self._read_ptr = read_ptr
 
-    def _clamp_read_ptr_to_valid_window(self) -> None:
-        wp = int(self._write_ptr.value)
-        oldest_available = max(0, wp - self.num_slots)
-        if int(self._read_ptr.value) >= oldest_available:
-            return
-        with self._read_ptr.get_lock():
-            if int(self._read_ptr.value) < oldest_available:
-                self._read_ptr.value = oldest_available
+    def _pending_count(self) -> int:
+        return max(0, int(self._write_ptr.value) - int(self._read_ptr.value))
+
+    def wait_for_write_slot(self, timeout: float | None = None) -> bool:
+        import time
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._pending_count() >= self.num_slots:
+            if deadline is not None and time.monotonic() > deadline:
+                return False
+            time.sleep(0.001)
+        return True
 
     @property
     def write_slot(self) -> int:
@@ -104,6 +108,7 @@ class RolloutRingBuffer:
 
     @property
     def write_buffer(self) -> Dict[str, np.ndarray]:
+        self.wait_for_write_slot()
         s = self.write_slot
         return {field: arr[s] for field, arr in self._arrays.items()}
 
@@ -112,8 +117,7 @@ class RolloutRingBuffer:
             self._write_ptr.value += 1
 
     def available(self) -> int:
-        self._clamp_read_ptr_to_valid_window()
-        return min(max(0, int(self._write_ptr.value) - int(self._read_ptr.value)), self.num_slots)
+        return min(self._pending_count(), self.num_slots)
 
     def wait_for_data(self, timeout: float = 60.0) -> bool:
         import time
@@ -127,7 +131,6 @@ class RolloutRingBuffer:
 
     @property
     def read_slot(self) -> int:
-        self._clamp_read_ptr_to_valid_window()
         return int(self._read_ptr.value) % self.num_slots
 
     def read_numpy_views(self) -> dict[str, np.ndarray]:
@@ -171,8 +174,7 @@ class RolloutRingBuffer:
         with self._read_ptr.get_lock():
             wp = int(self._write_ptr.value)
             rp = min(int(self._read_ptr.value) + 1, wp)
-            oldest_available = max(0, wp - self.num_slots)
-            self._read_ptr.value = max(rp, oldest_available)
+            self._read_ptr.value = rp
 
     def cleanup(self) -> None:
         for shm in self._shm_blocks.values():

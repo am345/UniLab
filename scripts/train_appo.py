@@ -54,6 +54,7 @@ def build_appo_runner_kwargs(
         "device": cfg.training.device,
         "collector_device": collector_device,
         "num_envs": cfg.algo.num_envs,
+        "num_workers": int(OmegaConf.select(cfg, "algo.num_workers", default=1)),
         "steps_per_env": cfg.algo.steps_per_env,
         "sim_backend": cfg.training.sim_backend,
         "seed": rl_cfg.get("seed"),

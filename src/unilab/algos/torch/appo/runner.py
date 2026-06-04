@@ -43,6 +43,10 @@ def _sync_resume_target_actor(learner: APPOLearner) -> None:
         param.requires_grad = False
 
 
+def _ring_slots_from_replay_queue_size(replay_queue_size: int) -> int:
+    return max(2, int(replay_queue_size) + 1)
+
+
 class APPORunner(AsyncRunner):
     """APPO async runner using shared memory."""
 
@@ -56,12 +60,11 @@ class APPORunner(AsyncRunner):
         sim_backend: str = "mujoco",
         num_envs: int = 1024,
         steps_per_env: int = 24,
-        num_workers: int = 1,  # kept for API compat, but only 1 collector used
+        num_workers: int = 1,
         replay_queue_size: int = 3,
         seed: int | None = None,
         resume_path: str | None = None,
     ):
-        del num_workers
         super().__init__(
             env_name=env_name,
             env_cfg_overrides=env_cfg_overrides,
@@ -73,12 +76,16 @@ class APPORunner(AsyncRunner):
         )
 
         self.steps_per_env = steps_per_env
-        self.replay_queue_size = replay_queue_size
-        self.staging_pool_size = replay_queue_size
+        self.num_workers = int(num_workers)
+        self.replay_queue_size = int(replay_queue_size)
+        if self.num_workers < 1:
+            raise ValueError("APPO num_workers must be >= 1")
+        if self.replay_queue_size < 1:
+            raise ValueError("APPO replay_queue_size must be >= 1")
+        self.ring_num_slots = _ring_slots_from_replay_queue_size(self.replay_queue_size)
+        self.staging_pool_size = self.replay_queue_size * self.num_workers
         self.seed = seed
         self.resume_path = resume_path
-        if self.staging_pool_size < 1:
-            raise ValueError("APPO staging pool size must be >= 1")
 
         # Resolve dims
         self._resolve_dims()
@@ -196,6 +203,24 @@ class APPORunner(AsyncRunner):
     def _collector_fn(self, stop_event, **kwargs):
         appo_collector_fn(stop_event=stop_event, **kwargs)
 
+    def _wait_for_any_rollout(
+        self,
+        rollout_ring_buffers: list[RolloutRingBuffer],
+        *,
+        timeout: float = 60.0,
+    ) -> bool:
+        if len(rollout_ring_buffers) == 1:
+            return rollout_ring_buffers[0].wait_for_data(timeout=timeout)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() <= deadline:
+            if not self._check_collector_alive():
+                return False
+            if any(buffer.available() > 0 for buffer in rollout_ring_buffers):
+                return True
+            time.sleep(0.001)
+        return False
+
     def learn(
         self,
         max_iterations: int = 1500,
@@ -229,22 +254,25 @@ class APPORunner(AsyncRunner):
             obs_dim=self.obs_dim,
             action_dim=self.action_dim,
             critic_dim=self.critic_dim,
-            num_slots=4,
+            num_slots=self.ring_num_slots,
+            num_workers=self.num_workers,
         )
         warn_if_over_budget(mem_est, label="APPO")
 
-        # Create shared rollout IPC ring buffer; learner-side tensor lifetime is
-        # owned by the bounded staging pool below.
-        rollout_ring_buffer = RolloutRingBuffer(
-            num_envs=self.num_envs,
-            num_steps=self.steps_per_env,
-            obs_dim=self.obs_dim,
-            action_dim=self.action_dim,
-            critic_dim=self.critic_dim,
-            num_slots=4,
-            create=True,
-        )
-        self._shared_resources.append(rollout_ring_buffer)
+        # 每个 collector 独占一个 rollout ring，避免多进程同时写同一指针。
+        rollout_ring_buffers: list[RolloutRingBuffer] = []
+        for _worker_index in range(self.num_workers):
+            rollout_ring_buffer = RolloutRingBuffer(
+                num_envs=self.num_envs,
+                num_steps=self.steps_per_env,
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                critic_dim=self.critic_dim,
+                num_slots=self.ring_num_slots,
+                create=True,
+            )
+            rollout_ring_buffers.append(rollout_ring_buffer)
+        self._shared_resources.extend(rollout_ring_buffers)
 
         # Create weight sync for collector-side actor and critic bootstrap values.
         actor_weight_sync = SharedWeightSync.from_state_dict(
@@ -262,43 +290,54 @@ class APPORunner(AsyncRunner):
             name: p.shape for name, p in learner.critic.state_dict().items()
         }
 
-        metrics_queue: mp.Queue = mp.get_context("spawn").Queue(maxsize=100)
-
-        # Start collector
-        collector_kwargs = {
-            "env_name": self.env_name,
-            "rl_cfg": self.rl_cfg,
-            "num_envs": self.num_envs,
-            "steps_per_env": self.steps_per_env,
-            "shm_rollout_ring_buffer_name": rollout_ring_buffer.name,
-            "sync_primitives": (
-                rollout_ring_buffer._write_ptr,
-                rollout_ring_buffer._read_ptr,
-            ),
-            "obs_dim": self.obs_dim,
-            "action_dim": self.action_dim,
-            "critic_dim": self.critic_dim,
-            "actor_weight_sync_name": actor_weight_sync.name,
-            "actor_weight_param_shapes": actor_weight_param_shapes,
-            "critic_weight_sync_name": critic_weight_sync.name,
-            "critic_weight_param_shapes": critic_weight_param_shapes,
-            "metrics_queue": metrics_queue,
-            "collector_device": self.collector_device,
-            "sim_backend": self.sim_backend,
-            "env_cfg_override": self.env_cfg_overrides if self.env_cfg_overrides else None,
-            "seed": derive_worker_seed(self.seed, worker_index=0),
-        }
-        self._start_collector(
-            target_fn=appo_collector_fn,
-            kwargs={"stop_event": self._stop_event, **collector_kwargs},
+        metrics_queue: mp.Queue = mp.get_context("spawn").Queue(
+            maxsize=max(100, 50 * self.num_workers)
         )
 
-        env_steps_per_sync = self.steps_per_env * self.num_envs
+        for worker_index, rollout_ring_buffer in enumerate(rollout_ring_buffers):
+            collector_kwargs = {
+                "env_name": self.env_name,
+                "rl_cfg": self.rl_cfg,
+                "num_envs": self.num_envs,
+                "steps_per_env": self.steps_per_env,
+                "shm_rollout_ring_buffer_name": rollout_ring_buffer.name,
+                "sync_primitives": (
+                    rollout_ring_buffer._write_ptr,
+                    rollout_ring_buffer._read_ptr,
+                ),
+                "obs_dim": self.obs_dim,
+                "action_dim": self.action_dim,
+                "critic_dim": self.critic_dim,
+                "actor_weight_sync_name": actor_weight_sync.name,
+                "actor_weight_param_shapes": actor_weight_param_shapes,
+                "actor_weight_sync_lock": actor_weight_sync._lock,
+                "critic_weight_sync_name": critic_weight_sync.name,
+                "critic_weight_param_shapes": critic_weight_param_shapes,
+                "critic_weight_sync_lock": critic_weight_sync._lock,
+                "metrics_queue": metrics_queue,
+                "collector_device": self.collector_device,
+                "sim_backend": self.sim_backend,
+                "env_cfg_override": self.env_cfg_overrides if self.env_cfg_overrides else None,
+                "seed": derive_worker_seed(self.seed, worker_index=worker_index),
+                "worker_index": worker_index,
+                "worker_name": f"APPOWorker-{worker_index}",
+            }
+            self._start_collector(
+                target_fn=appo_collector_fn,
+                kwargs={
+                    "stop_event": self._stop_event,
+                    "_error_label": f"appo-collector-{worker_index}",
+                    **collector_kwargs,
+                },
+            )
+
+        env_steps_per_rollout = self.steps_per_env * self.num_envs
+        env_steps_per_sync = env_steps_per_rollout * self.num_workers
 
         logger = OffPolicyLogger(
             algo_name="APPO",
             max_iterations=max_iterations,
-            num_envs=self.num_envs,
+            num_envs=self.num_envs * self.num_workers,
             env_name=self.env_name,
             obs_dim=self.obs_dim,
             action_dim=self.action_dim,
@@ -309,32 +348,44 @@ class APPORunner(AsyncRunner):
         logger.log_status(
             f"Waiting for first rollout... "
             f"(staging_pool={self.staging_pool_size}, "
+            f"workers={self.num_workers}, "
             f"epochs={learner.num_learning_epochs})"
         )
         logger_started = False
 
         reward_history: deque = deque(maxlen=200)
         latest_reward_components: dict = {}
+        total_env_steps_read = 0
 
         staging_pool = RolloutStagingPool(
             capacity=self.staging_pool_size,
             num_envs=self.num_envs,
-            slot_shapes=rollout_ring_buffer.slot_shapes,
+            slot_shapes=rollout_ring_buffers[0].slot_shapes,
             device=self.device,
         )
 
         for iteration in range(1, max_iterations + 1):
             # Drain collector metrics while waiting for next rollout
-            self._drain_metrics(metrics_queue, reward_history, latest_reward_components, logger)
+            self._drain_metrics(
+                metrics_queue,
+                reward_history,
+                latest_reward_components,
+                logger,
+                log_total_steps=False,
+            )
             wait_start = time.time()
 
-            data_ready = rollout_ring_buffer.wait_for_data(timeout=60.0)
+            data_ready = self._wait_for_any_rollout(rollout_ring_buffers, timeout=60.0)
             if not data_ready:
                 # Check if the collector subprocess died — fail fast instead of
                 # burning through remaining iterations with 60s timeouts each.
                 if not self._check_collector_alive():
                     self._drain_metrics(
-                        metrics_queue, reward_history, latest_reward_components, logger
+                        metrics_queue,
+                        reward_history,
+                        latest_reward_components,
+                        logger,
+                        log_total_steps=False,
                     )
                     raise RuntimeError(
                         "APPO collector process died before producing data. "
@@ -345,26 +396,51 @@ class APPORunner(AsyncRunner):
                 )
                 continue
 
+            if not self._check_collector_alive():
+                self._drain_metrics(
+                    metrics_queue,
+                    reward_history,
+                    latest_reward_components,
+                    logger,
+                    log_total_steps=False,
+                )
+                raise RuntimeError(
+                    "APPO collector process died while producing data. "
+                    "Check stderr for collector crash messages."
+                )
+
             if not logger_started:
                 logger.start(status="Training")
                 logger_started = True
 
-            available_on_arrive = rollout_ring_buffer.available()
+            available_by_worker = [buffer.available() for buffer in rollout_ring_buffers]
+            available_on_arrive = sum(available_by_worker)
             wait_time = time.time() - wait_start
 
             # Drain ALL available slots into the staging pool in one pass.
             # This keeps the GPU busy: if the collector produced 3 rollouts while
             # the learner was training, we consume all 3 immediately rather than
             # processing them one-per-iteration.
-            num_new = rollout_ring_buffer.available()
+            num_new = 0
             learner_incremental_h2d_time = 0.0
-            for _ in range(num_new):
-                h2d_start = time.perf_counter()
-                staging_pool.stage_numpy_views(rollout_ring_buffer.read_numpy_views())
-                learner_incremental_h2d_time += time.perf_counter() - h2d_start
-                rollout_ring_buffer.advance_read()
+            for rollout_ring_buffer, available_count in zip(
+                rollout_ring_buffers,
+                available_by_worker,
+            ):
+                for _ in range(available_count):
+                    h2d_start = time.perf_counter()
+                    staging_pool.stage_numpy_views(rollout_ring_buffer.read_numpy_views())
+                    learner_incremental_h2d_time += time.perf_counter() - h2d_start
+                    rollout_ring_buffer.advance_read()
+                    num_new += 1
 
-            self._drain_metrics(metrics_queue, reward_history, latest_reward_components, logger)
+            self._drain_metrics(
+                metrics_queue,
+                reward_history,
+                latest_reward_components,
+                logger,
+                log_total_steps=False,
+            )
 
             combined = staging_pool.batch()
 
@@ -391,6 +467,8 @@ class APPORunner(AsyncRunner):
             )
             last_mean_reward = float(mean_reward)
             best_mean_reward = max(best_mean_reward, last_mean_reward)
+            total_env_steps_read += num_new * env_steps_per_rollout
+            logger.log_collector(total_env_steps_read, 0, 0.0)
 
             logger.log_step(
                 iteration=iteration,
@@ -402,7 +480,7 @@ class APPORunner(AsyncRunner):
                 learner_incremental_h2d_time=learner_incremental_h2d_time,
                 weight_sync_time=weight_sync_time,
                 extra_info={
-                    "throughput_steps": num_new * env_steps_per_sync,
+                    "throughput_steps": num_new * env_steps_per_rollout,
                 },
             )
 
@@ -430,7 +508,7 @@ class APPORunner(AsyncRunner):
     # _check_collector_alive() inherited from AsyncRunner base class
 
     @staticmethod
-    def _drain_metrics(queue, reward_history, reward_components, logger):
+    def _drain_metrics(queue, reward_history, reward_components, logger, *, log_total_steps=True):
         """Drain all pending messages from the collector metrics queue.
 
         Mirrors OffPolicyRunner._drain_metrics so APPO has the same
@@ -462,7 +540,7 @@ class APPORunner(AsyncRunner):
                         terminated_rate=float(m.get("terminated_rate", 0.0)),
                     )
 
-                if "total_steps" in m:
+                if log_total_steps and "total_steps" in m:
                     logger.log_collector(
                         m["total_steps"],
                         0,  # APPO uses shared memory, not a separate buffer

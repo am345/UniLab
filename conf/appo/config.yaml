@@ -7,6 +7,7 @@ algo:
   algo_log_name: appo
   seed: 1
   num_envs: 2048
+  num_workers: 1
   steps_per_env: 24
   max_iterations: 150
   save_interval: 50

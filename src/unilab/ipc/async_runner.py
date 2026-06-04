@@ -67,10 +67,12 @@ class AsyncRunner(ABC):
         self.num_envs = num_envs
 
         self._collector_process: Any = None
+        self._collector_processes: list[Any] = []
         self._stop_event = _SPAWN_CTX.Event()
         self._shared_resources: list = []
         self._error_recv: Any = None
         self._error_send: Any = None
+        self._error_recvs: list[Any] = []
 
     @abstractmethod
     def _get_default_device(self) -> str:
@@ -89,56 +91,78 @@ class AsyncRunner(ABC):
     ) -> None: ...
 
     def _start_collector(self, target_fn: Callable, kwargs: dict) -> None:
-        self._error_recv, self._error_send = create_error_pipe()
+        error_recv, error_send = create_error_pipe()
 
-        self._collector_process = _SPAWN_CTX.Process(
+        process = _SPAWN_CTX.Process(
             target=_collector_entry_wrapper,
-            args=(target_fn, self._error_send, kwargs),
+            args=(target_fn, error_send, dict(kwargs)),
             daemon=True,
         )
-        self._collector_process.start()
-        self._error_send.close()
+        process.start()
+        error_send.close()
+
+        self._collector_process = process
+        self._collector_processes.append(process)
+        self._error_recv = error_recv
+        self._error_recvs.append(error_recv)
         self._error_send = None
+
+    def _active_collectors(self) -> list[tuple[Any, Any]]:
+        if self._collector_processes:
+            return list(zip(self._collector_processes, self._error_recvs))
+        if self._collector_process is None:
+            return []
+        return [(self._collector_process, self._error_recv)]
 
     def _check_collector_alive(self) -> bool:
         """Check if collector is alive. Prints full diagnostic if dead."""
-        if self._collector_process is None:
-            return True
-        if self._collector_process.is_alive():
-            return True
+        for process, error_recv in self._active_collectors():
+            if process is None or process.is_alive():
+                continue
 
-        death_info = self._read_collector_error()
-        print(f"\n{death_info}\n", file=sys.stderr, flush=True)
-        return False
+            death_info = self._read_collector_error(process=process, error_recv=error_recv)
+            print(f"\n{death_info}\n", file=sys.stderr, flush=True)
+            return False
+        return True
 
-    def _read_collector_error(self) -> str:
+    def _read_collector_error(
+        self,
+        process: Any | None = None,
+        error_recv: Any | None = None,
+    ) -> str:
         """Read error info from dead collector — pipe first, then exit code."""
+        process = process if process is not None else self._collector_process
+        error_recv = error_recv if error_recv is not None else self._error_recv
         traceback_text = None
-        if self._error_recv is not None:
+        if error_recv is not None:
             try:
-                if self._error_recv.poll(timeout=0.1):
-                    obj = self._error_recv.recv()
+                if error_recv.poll(timeout=0.1):
+                    obj = error_recv.recv()
                     if isinstance(obj, ExceptionWrapper):
                         traceback_text = obj.exc_msg
             except (EOFError, OSError):
                 pass
 
-        exitcode = getattr(self._collector_process, "exitcode", None)
+        exitcode = getattr(process, "exitcode", None)
         return format_collector_death(exitcode, traceback_text)
 
     def close(self) -> None:
         self._stop_event.set()
-        if self._collector_process is not None and self._collector_process.is_alive():
-            self._collector_process.join(timeout=10)
-            if self._collector_process.is_alive():
-                self._collector_process.terminate()
-                self._collector_process.join(timeout=5)
+        collectors = self._active_collectors()
+        for process, _error_recv in collectors:
+            if process is not None and process.is_alive():
+                process.join(timeout=10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
 
-        if self._collector_process is not None:
-            exitcode = getattr(self._collector_process, "exitcode", None)
+        for process, error_recv in collectors:
+            if process is None:
+                continue
+            exitcode = getattr(process, "exitcode", None)
             # -15 (SIGTERM) is expected during normal close()
             if exitcode is not None and exitcode != 0 and exitcode != -15:
-                death_info = self._read_collector_error()
+                death_info = self._read_collector_error(process=process, error_recv=error_recv)
                 print(
                     f"\n[AsyncRunner] Collector exited with code {exitcode}:\n{death_info}\n",
                     file=sys.stderr,
@@ -150,6 +174,13 @@ class AsyncRunner(ABC):
                 resource.cleanup()
             elif hasattr(resource, "close"):
                 resource.close()
+
+        for error_recv in self._error_recvs:
+            try:
+                error_recv.close()
+            except Exception:
+                pass
+        self._error_recvs.clear()
 
         if self._error_recv is not None:
             try:

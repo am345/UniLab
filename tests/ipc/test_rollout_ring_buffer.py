@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 import torch
@@ -75,22 +78,39 @@ def test_available_returns_correct_count():
     s.cleanup()
 
 
-def test_advance_read_skips_overwritten_slots():
-    """If writer ran far ahead (wp - rp > num_slots), advance_read fast-forwards."""
+def test_write_buffer_waits_when_ring_is_full():
+    """满 ring 时 writer 必须等待 reader 前进，避免覆盖未读 rollout。"""
     s = _make_ring_buffer(num_slots=2)
-    # Writer produces 4 rollouts (2x more than num_slots)
-    for _ in range(4):
+
+    for value in (1.0, 2.0):
+        wb = s.write_buffer
+        for arr in wb.values():
+            arr[:] = value
         s.signal_write_done()
-    s.advance_read()
-    # After advance, rp should have jumped past overwritten slots
-    # wp - rp should be <= num_slots
-    assert int(s._write_ptr.value) - int(s._read_ptr.value) <= s.num_slots
+    assert s.available() == 2
+
+    def delayed_advance() -> None:
+        time.sleep(0.05)
+        s.advance_read()
+
+    reader = threading.Thread(target=delayed_advance)
+    reader.start()
+    start = time.monotonic()
+    wb = s.write_buffer
+    elapsed = time.monotonic() - start
+
+    reader.join(timeout=1.0)
+    assert elapsed >= 0.03
+    for arr in wb.values():
+        arr[:] = 3.0
+    s.signal_write_done()
+    assert s.available() == 2
     s.cleanup()
 
 
-def test_reader_clamps_to_oldest_non_overwritten_slot_before_read():
+def test_writer_preserves_unread_slots_after_reader_advances():
     s = _make_ring_buffer(num_slots=2)
-    for value in (1.0, 2.0, 3.0):
+    for value in (1.0, 2.0):
         wb = s.write_buffer
         for arr in wb.values():
             arr[:] = value
@@ -98,11 +118,20 @@ def test_reader_clamps_to_oldest_non_overwritten_slot_before_read():
 
     assert s.available() == 2
     first = s.read_torch("cpu")
-    assert torch.all(first["obs"] == 2.0)
+    assert torch.all(first["obs"] == 1.0)
 
     s.advance_read()
+    wb = s.write_buffer
+    for arr in wb.values():
+        arr[:] = 3.0
+    s.signal_write_done()
+
     second = s.read_torch("cpu")
-    assert torch.all(second["obs"] == 3.0)
+    assert torch.all(second["obs"] == 2.0)
+    s.advance_read()
+
+    third = s.read_torch("cpu")
+    assert torch.all(third["obs"] == 3.0)
     s.cleanup()
 
 

@@ -192,6 +192,10 @@ def _noop_collector(stop_event) -> None:
     stop_event.wait(timeout=30)
 
 
+def _collector_exit_immediately(stop_event) -> None:
+    return
+
+
 def _collector_report_kwargs(
     stop_event,
     report_queue,
@@ -224,6 +228,62 @@ def test_start_collector_does_not_merge_runner_runtime_fields():
     )
     payload = report_queue.get(timeout=5)
     assert payload == {"sim_backend": "missing", "token": "ok"}
+    r.close()
+
+
+def test_start_collector_registers_multiple_processes_and_error_pipes():
+    r = _make_runner()
+
+    r._start_collector(target_fn=_noop_collector, kwargs={"stop_event": r._stop_event})
+    first_process = r._collector_process
+    r._start_collector(target_fn=_noop_collector, kwargs={"stop_event": r._stop_event})
+    second_process = r._collector_process
+
+    assert first_process is not None
+    assert second_process is not None
+    assert first_process is not second_process
+    assert r._collector_process is second_process
+    assert r._collector_processes == [first_process, second_process]
+    assert len(r._error_recvs) == 2
+    assert all(process.is_alive() for process in r._collector_processes)
+
+    r.close()
+
+
+def test_close_stops_all_registered_collectors():
+    r = _make_runner()
+    r._start_collector(target_fn=_noop_collector, kwargs={"stop_event": r._stop_event})
+    r._start_collector(target_fn=_noop_collector, kwargs={"stop_event": r._stop_event})
+    processes = list(r._collector_processes)
+    assert len(processes) == 2
+    assert all(process.is_alive() for process in processes)
+
+    r.close()
+
+    assert r._stop_event.is_set()
+    for process in processes:
+        assert not process.is_alive()
+        assert process.exitcode in (0, -signal.SIGTERM)
+
+
+def test_check_collector_alive_detects_any_dead_collector():
+    r = _make_runner()
+    r._start_collector(
+        target_fn=_collector_exit_immediately,
+        kwargs={"stop_event": r._stop_event},
+    )
+    dead_process = r._collector_process
+    assert dead_process is not None
+    dead_process.join(timeout=10)
+    assert not dead_process.is_alive()
+
+    r._start_collector(target_fn=_noop_collector, kwargs={"stop_event": r._stop_event})
+    live_process = r._collector_process
+    assert live_process is not None
+    assert live_process.is_alive()
+
+    assert r._check_collector_alive() is False
+
     r.close()
 
 

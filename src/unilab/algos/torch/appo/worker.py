@@ -100,6 +100,10 @@ def appo_collector_fn(
     sim_backend: str = "mujoco",
     env_cfg_override: dict | None = None,
     seed: int | None = None,
+    worker_index: int = 0,
+    worker_name: str | None = None,
+    actor_weight_sync_lock: Any | None = None,
+    critic_weight_sync_lock: Any | None = None,
 ):
     """Entry point for the APPO collector subprocess.
 
@@ -114,6 +118,7 @@ def appo_collector_fn(
     from unilab.base import registry
     from unilab.ipc import RolloutRingBuffer, SharedWeightSync
 
+    worker_label = worker_name or f"APPOWorker-{worker_index}"
     ensure_registries()
     apply_training_seed(seed, torch_runtime=True, cuda=True)
 
@@ -129,10 +134,16 @@ def appo_collector_fn(
     )
     ring_buffer.attach_sync_primitives(*sync_primitives)  # (write_ptr, read_ptr)
     actor_weight_sync = SharedWeightSync(
-        actor_weight_param_shapes, create=False, shm_name=actor_weight_sync_name
+        actor_weight_param_shapes,
+        create=False,
+        shm_name=actor_weight_sync_name,
+        lock=actor_weight_sync_lock,
     )
     critic_weight_sync = SharedWeightSync(
-        critic_weight_param_shapes, create=False, shm_name=critic_weight_sync_name
+        critic_weight_param_shapes,
+        create=False,
+        shm_name=critic_weight_sync_name,
+        lock=critic_weight_sync_lock,
     )
 
     # Create environment
@@ -325,6 +336,8 @@ def appo_collector_fn(
                 if metrics_queue is not None and total_steps % (num_envs * 10) == 0 and ep_rewards:
                     try:
                         msg = {
+                            "worker_index": worker_index,
+                            "worker_name": worker_label,
                             "total_steps": total_steps,
                             "mean_ep_reward": statistics.mean(ep_rewards[-100:]),
                             "mean_ep_length": statistics.mean(ep_lengths[-100:])
@@ -348,10 +361,10 @@ def appo_collector_fn(
                                 k: statistics.mean(v) for k, v in ep_reward_components.items() if v
                             }
                             ep_reward_components.clear()
-                        put_latest_metrics(metrics_queue, msg, worker_name="APPOWorker")
+                        put_latest_metrics(metrics_queue, msg, worker_name=worker_label)
                     except Exception as e:
                         print(
-                            f"[APPOWorker] metrics build error: {type(e).__name__}: {e}",
+                            f"[{worker_label}] metrics build error: {type(e).__name__}: {e}",
                             file=sys.stderr,
                         )
 

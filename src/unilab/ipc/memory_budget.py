@@ -48,21 +48,23 @@ def estimate_appo_bytes(
     action_dim: int,
     critic_dim: int,
     num_slots: int = 4,
+    num_workers: int = 1,
 ) -> dict[str, int | str]:
     """Estimate memory for APPO rollout ring buffer."""
     per_step = obs_dim + action_dim + 1 + 1 + 1 + 1 + critic_dim
     per_slot = num_envs * steps_per_env * per_step * 4
     last_obs_per_slot = num_envs * (obs_dim + critic_dim) * 4
     total_per_slot = per_slot + last_obs_per_slot
-    total = total_per_slot * num_slots
+    total = total_per_slot * num_slots * num_workers
 
     return {
         "ring_buffer": total,
         "total": total,
         "breakdown": (
             f"Ring buffer: {total / 1024**2:.0f} MB "
-            f"({num_slots} slots × {num_envs} envs × {steps_per_env} steps × "
-            f"{per_step} cols × 4B)"
+            f"({num_workers} workers x {num_slots} slots x "
+            f"{num_envs} envs x {steps_per_env} steps x "
+            f"{per_step} cols x 4B)"
         ),
     }
 

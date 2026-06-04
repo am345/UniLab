@@ -209,6 +209,7 @@ class APPOConfig(BaseConfig):
     algo_log_name: str = "appo"
     seed: int = 1
     num_envs: int = 2048
+    num_workers: int = 1
     steps_per_env: int = 24
     max_iterations: int = 150
     save_interval: int = 50
