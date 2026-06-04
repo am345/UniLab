@@ -263,6 +263,20 @@ def test_serialleg_angular_momentum_uses_robot_body_state_when_available() -> No
     np.testing.assert_allclose(momentum_sq, [0.25, 0.0])
 
 
+def test_serialleg_angular_momentum_prefers_mujoco_subtree_sensor() -> None:
+    class FakeBackend:
+        def get_sensor_data(self, name: str) -> np.ndarray:
+            assert name == "robot_subtree_angmom"
+            return np.array([[1.0, 2.0, 2.0], [0.0, 3.0, 4.0]], dtype=np.float64)
+
+    env = _serialleg_env_stub()
+    env._backend = FakeBackend()
+
+    momentum_sq = env._robot_angular_momentum_sq(np.full((2, 3), 9.0, dtype=np.float64))
+
+    np.testing.assert_allclose(momentum_sq, [9.0, 25.0])
+
+
 def test_serialleg_hydra_owner_config_feeds_env_override() -> None:
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(CONF_DIR / "ppo"), version_base="1.3"):
@@ -343,6 +357,7 @@ def test_serialleg_xml_keeps_policy_order_sensor_contract() -> None:
         "gyro",
         "local_linvel",
         "upvector",
+        "robot_subtree_angmom",
         "base_contact",
         "l_wheel_contact",
         "r_wheel_contact",

@@ -107,6 +107,7 @@
     <gyro name="gyro" site="imu" />
     <velocimeter name="local_linvel" site="imu" />
     <framezaxis name="upvector" objtype="site" objname="imu" />
+    <subtreeangmom name="robot_subtree_angmom" body="base_link" />
     <touch name="base_contact" site="base_contact_site" />
     <touch name="l_wheel_contact" site="l_wheel_contact_site" />
     <touch name="r_wheel_contact" site="r_wheel_contact_site" />

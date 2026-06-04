@@ -1072,6 +1072,14 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
 
     def _robot_angular_momentum_sq(self, fallback_angvel: np.ndarray) -> np.ndarray:
+        try:
+            angmom = np.asarray(
+                self._backend.get_sensor_data("robot_subtree_angmom"), dtype=np.float64
+            ).reshape(self._num_envs, 3)
+            return np.sum(np.square(angmom), axis=1)
+        except Exception:
+            pass
+
         body_ids = getattr(self, "_robot_body_ids", None)
         body_mass = getattr(self, "_robot_body_mass", None)
         body_inertia = getattr(self, "_robot_body_inertia", None)
