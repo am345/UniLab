@@ -203,23 +203,26 @@ class APPORunner(AsyncRunner):
     def _collector_fn(self, stop_event, **kwargs):
         appo_collector_fn(stop_event=stop_event, **kwargs)
 
-    def _wait_for_any_rollout(
+    def _wait_for_rollouts(
         self,
         rollout_ring_buffers: list[RolloutRingBuffer],
         *,
+        min_ready: int,
         timeout: float = 60.0,
     ) -> bool:
-        if len(rollout_ring_buffers) == 1:
+        min_ready = max(1, int(min_ready))
+        if len(rollout_ring_buffers) == 1 and min_ready <= 1:
             return rollout_ring_buffers[0].wait_for_data(timeout=timeout)
 
         deadline = time.monotonic() + timeout
         while time.monotonic() <= deadline:
             if not self._check_collector_alive():
                 return False
-            if any(buffer.available() > 0 for buffer in rollout_ring_buffers):
+            available = sum(buffer.available() for buffer in rollout_ring_buffers)
+            if available >= min_ready:
                 return True
             time.sleep(0.001)
-        return False
+        return sum(buffer.available() for buffer in rollout_ring_buffers) > 0
 
     def learn(
         self,
@@ -375,7 +378,11 @@ class APPORunner(AsyncRunner):
             )
             wait_start = time.time()
 
-            data_ready = self._wait_for_any_rollout(rollout_ring_buffers, timeout=60.0)
+            data_ready = self._wait_for_rollouts(
+                rollout_ring_buffers,
+                min_ready=self.num_workers,
+                timeout=60.0,
+            )
             if not data_ready:
                 # Check if the collector subprocess died — fail fast instead of
                 # burning through remaining iterations with 60s timeouts each.
