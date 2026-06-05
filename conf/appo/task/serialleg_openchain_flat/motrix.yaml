@@ -9,6 +9,7 @@ algo:
   steps_per_env: 16
   max_iterations: 150
 env:
+  sim_dt: 0.015
   render_offset_mode: zero
   motrix_max_iterations: 3
   commands:
