@@ -431,9 +431,16 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._policy_leg_pos = np.zeros((num_envs, NUM_POLICY_LEG_ACTIONS), dtype=self._np_dtype)
         self._last_policy_leg_vel = np.zeros_like(self._policy_leg_vel)
         self._policy_leg_acc = np.zeros_like(self._policy_leg_vel)
+        self._policy_order_torque_buf = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._bad_orientation_steps = np.zeros((num_envs,), dtype=np.int32)
         self._zero_base_contact_force = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._wheel_contact_force_buf = np.zeros(
+            (num_envs, NUM_WHEEL_ACTIONS), dtype=self._np_dtype
+        )
+        self._leg_contact_force_buf = np.zeros(
+            (num_envs, NUM_POLICY_LEG_ACTIONS), dtype=self._np_dtype
+        )
         self._zero_leg_contact_forces = np.zeros(
             (num_envs, NUM_POLICY_LEG_ACTIONS), dtype=self._np_dtype
         )
@@ -964,9 +971,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._last_policy_leg_vel[:] = self._policy_leg_vel
 
         state.info["torques"] = self._policy_order_torques()
-        state.info["policy_leg_torque"] = self._policy_leg_torque.copy()
-        state.info["policy_leg_vel"] = self._policy_leg_vel.copy()
-        state.info["policy_leg_acc"] = self._policy_leg_acc.copy()
+        state.info["policy_leg_torque"] = self._policy_leg_torque
+        state.info["policy_leg_vel"] = self._policy_leg_vel
+        state.info["policy_leg_acc"] = self._policy_leg_acc
         state.info["base_contact_force"] = base_contact_force
         state.info["wheel_contact_forces"] = wheel_contact_forces
         state.info["leg_contact_forces"] = leg_contact_forces
@@ -1448,27 +1455,24 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         return np.ones((data["base_pos"].shape[0],), dtype=get_global_dtype())
 
     def _policy_order_torques(self) -> np.ndarray:
-        torques = np.zeros((self._num_envs, NUM_ACTIONS), dtype=get_global_dtype())
+        torques = self._policy_order_torque_buf
         torques[:, :NUM_POLICY_LEG_ACTIONS] = self._policy_leg_torque
         torques[:, NUM_POLICY_LEG_ACTIONS:] = self._last_motor_ctrl[:, WHEEL_INDICES]
         return torques
 
     def _wheel_contact_forces(self) -> np.ndarray:
-        return np.stack(
-            [self._sensor_scalar("l_wheel_contact"), self._sensor_scalar("r_wheel_contact")],
-            axis=1,
-        ).astype(get_global_dtype())
+        contact = self._wheel_contact_force_buf
+        contact[:, 0] = self._sensor_scalar("l_wheel_contact")
+        contact[:, 1] = self._sensor_scalar("r_wheel_contact")
+        return contact
 
     def _leg_contact_forces(self) -> np.ndarray:
-        return np.stack(
-            [
-                self._sensor_scalar("lf0_contact"),
-                self._sensor_scalar("lf1_contact"),
-                self._sensor_scalar("rf0_contact"),
-                self._sensor_scalar("rf1_contact"),
-            ],
-            axis=1,
-        ).astype(get_global_dtype())
+        contact = self._leg_contact_force_buf
+        contact[:, 0] = self._sensor_scalar("lf0_contact")
+        contact[:, 1] = self._sensor_scalar("lf1_contact")
+        contact[:, 2] = self._sensor_scalar("rf0_contact")
+        contact[:, 3] = self._sensor_scalar("rf1_contact")
+        return contact
 
     def _sensor_scalar(self, name: str) -> np.ndarray:
         try:

@@ -248,6 +248,49 @@ def test_serialleg_action_delay_indices_are_cached_and_updated(
     np.testing.assert_allclose(delayed[:, 0], [10.0, 5.0])
 
 
+def test_serialleg_policy_order_torque_buffer_is_reused() -> None:
+    env = _serialleg_env_stub()
+    env._policy_leg_torque = np.array(
+        [[1.0, 2.0, 3.0, 4.0], [-1.0, -2.0, -3.0, -4.0]], dtype=np.float32
+    )
+    env._last_motor_ctrl = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
+    env._last_motor_ctrl[:, WHEEL_INDICES] = np.array([[5.0, 6.0], [-5.0, -6.0]], dtype=np.float32)
+    env._policy_order_torque_buf = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
+
+    torques = env._policy_order_torques()
+    second = env._policy_order_torques()
+
+    assert torques is env._policy_order_torque_buf
+    assert second is torques
+    np.testing.assert_allclose(torques[:, :NUM_POLICY_LEG_ACTIONS], env._policy_leg_torque)
+    np.testing.assert_allclose(torques[:, NUM_POLICY_LEG_ACTIONS:], [[5.0, 6.0], [-5.0, -6.0]])
+
+
+def test_serialleg_contact_force_buffers_are_reused() -> None:
+    env = _serialleg_env_stub()
+    env._wheel_contact_force_buf = np.zeros((2, 2), dtype=np.float32)
+    env._leg_contact_force_buf = np.zeros((2, 4), dtype=np.float32)
+    sensor_data = {
+        "l_wheel_contact": np.array([[3.0, 4.0, 0.0], [0.0, 0.0, 7.0]], dtype=np.float32),
+        "r_wheel_contact": np.array([[1.0, 2.0, 2.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+        "lf0_contact": np.array([[1.0], [2.0]], dtype=np.float32),
+        "lf1_contact": np.array([[3.0], [4.0]], dtype=np.float32),
+        "rf0_contact": np.array([[5.0], [6.0]], dtype=np.float32),
+        "rf1_contact": np.array([[7.0], [8.0]], dtype=np.float32),
+    }
+    env._backend = SimpleNamespace(get_sensor_data=lambda name: sensor_data[name])
+
+    wheel_contact = env._wheel_contact_forces()
+    leg_contact = env._leg_contact_forces()
+
+    assert wheel_contact is env._wheel_contact_force_buf
+    assert leg_contact is env._leg_contact_force_buf
+    np.testing.assert_allclose(wheel_contact, [[5.0, 3.0], [7.0, 0.0]])
+    np.testing.assert_allclose(leg_contact, [[1.0, 3.0, 5.0, 7.0], [2.0, 4.0, 6.0, 8.0]])
+    assert env._wheel_contact_forces() is wheel_contact
+    assert env._leg_contact_forces() is leg_contact
+
+
 def test_serialleg_contact_rewards_use_precomputed_contact_arrays() -> None:
     env = _serialleg_env_stub()
     env._reward_cfg = env._cfg.reward_config
