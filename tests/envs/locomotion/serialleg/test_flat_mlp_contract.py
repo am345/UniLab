@@ -465,6 +465,62 @@ def test_serialleg_contact_rewards_use_precomputed_contact_arrays() -> None:
     np.testing.assert_allclose(env._reward_upright_leg_contact(data), [1.0, 0.0])
 
 
+def test_serialleg_reward_terms_reuse_cached_upright_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _serialleg_env_stub()
+    env._reward_cfg = env._cfg.reward_config
+    cached_gate = np.array([1.0, 0.5], dtype=np.float32)
+    data = {
+        "info": {
+            "commands": np.array(
+                [[0.5, 0.2, 0.0, 0.0, DEFAULT_BASE_HEIGHT], [0.0, 0.0, 0.0, 0.0, 0.25]],
+                dtype=np.float32,
+            ),
+            "current_actions": np.ones((2, NUM_ACTIONS), dtype=np.float32),
+            "last_actions": np.zeros((2, NUM_ACTIONS), dtype=np.float32),
+            "steps": np.array([2, 2], dtype=np.uint32),
+        },
+        "base_pos": np.array([[0.0, 0.0, DEFAULT_BASE_HEIGHT], [0.0, 0.0, 0.25]], dtype=np.float32),
+        "base_linvel": np.array([[0.1, 0.0, 0.0], [0.0, 0.0, 0.1]], dtype=np.float32),
+        "base_angvel": np.array([[0.1, 0.2, 0.3], [0.2, 0.1, 0.0]], dtype=np.float32),
+        "projected_gravity": np.array([[0.0, 0.0, -0.7], [0.0, 0.0, -0.35]], dtype=np.float32),
+        "policy_leg_pos": env._default_policy_leg_pos.copy(),
+        "policy_leg_vel": np.ones((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        "base_contact_force": np.array([1.0, 1.0], dtype=np.float32),
+        "wheel_contact_forces": np.array([[50.0, 0.0], [0.0, 50.0]], dtype=np.float32),
+        "leg_contact_forces": np.array(
+            [[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]], dtype=np.float32
+        ),
+        "upright_factor": cached_gate,
+    }
+    monkeypatch.setattr(
+        env,
+        "_upright_factor",
+        lambda projected_gravity: pytest.fail("unexpected upright gate recompute"),
+    )
+    monkeypatch.setattr(
+        env,
+        "_robot_angular_momentum_sq",
+        lambda fallback_angvel: np.ones((2,), dtype=np.float32),
+    )
+
+    np.testing.assert_allclose(env._reward_collision(data), cached_gate)
+    for reward_fn in (
+        env._reward_tracking_lin_vel,
+        env._reward_tracking_ang_vel,
+        env._reward_ang_vel_xy,
+        env._reward_angular_momentum,
+        env._reward_stand_still,
+        env._reward_joint_mirror,
+        env._reward_contact_forces,
+        env._reward_upright_wheel_contact,
+        env._reward_upright_leg_contact,
+    ):
+        reward = reward_fn(data)
+        assert reward.shape == (2,)
+
+
 def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
     class FakePool:
         def __init__(self, sensor_data: np.ndarray) -> None:

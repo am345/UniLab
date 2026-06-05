@@ -1225,6 +1225,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             "dof_pos": dof_pos,
             "dof_vel": dof_vel,
             "base_contact_force": base_contact_force,
+            "upright_factor": self._upright_factor(projected_gravity),
             "wheel_contact_forces": wheel_contact_forces,
             "leg_contact_forces": leg_contact_forces,
             "policy_leg_pos": policy_leg_pos,
@@ -1291,10 +1292,15 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             np.clip(-projected_gravity[:, 2], 0.0, 0.7) / 0.7, dtype=get_global_dtype()
         )
 
+    def _reward_upright_factor(self, data: dict[str, Any]) -> np.ndarray:
+        gate = data.get("upright_factor")
+        if gate is not None:
+            return cast(np.ndarray, gate)
+        return self._upright_factor(data["projected_gravity"])
+
     def _reward_tracking_lin_vel(self, data: dict[str, Any]) -> np.ndarray:
         commands = data["info"]["commands"]
         linvel = data["base_linvel"]
-        pg = data["projected_gravity"]
         error_x = linvel[:, 0] - commands[:, 0]
         sigma = np.where(
             np.abs(commands[:, 0]) < 0.2,
@@ -1308,15 +1314,13 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             )
             / sigma
         )
-        return np.asarray(reward * self._upright_factor(pg), dtype=get_global_dtype())
+        return np.asarray(reward * self._reward_upright_factor(data), dtype=get_global_dtype())
 
     def _reward_tracking_ang_vel(self, data: dict[str, Any]) -> np.ndarray:
         commands = data["info"]["commands"]
         error = data["base_angvel"][:, 2] - commands[:, 1]
         reward = np.exp(-(error * error) / self._reward_cfg.tracking_ang_vel_sigma)
-        return np.asarray(
-            reward * self._upright_factor(data["projected_gravity"]), dtype=get_global_dtype()
-        )
+        return np.asarray(reward * self._reward_upright_factor(data), dtype=get_global_dtype())
 
     def _reward_tracking_orientation_l2(self, data: dict[str, Any]) -> np.ndarray:
         pg = data["projected_gravity"]
@@ -1348,12 +1352,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
 
     def _reward_ang_vel_xy(self, data: dict[str, Any]) -> np.ndarray:
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         gyro = data["base_angvel"]
         return np.asarray(np.sum(np.square(gyro[:, :2]), axis=1) * gate, dtype=get_global_dtype())
 
     def _reward_angular_momentum(self, data: dict[str, Any]) -> np.ndarray:
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         return np.asarray(
             self._robot_angular_momentum_sq(data["base_angvel"]) * gate, dtype=get_global_dtype()
         )
@@ -1418,7 +1422,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             np.sum(np.square(diff), axis=1)
             * stopped.astype(get_global_dtype())
             * height_scale
-            * self._upright_factor(data["projected_gravity"]),
+            * self._reward_upright_factor(data),
             dtype=get_global_dtype(),
         )
 
@@ -1446,7 +1450,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         pos = data["policy_leg_pos"]
         hip_diff = pos[:, 0] + pos[:, 2]
         knee_diff = pos[:, 1] + pos[:, 3]
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         return np.asarray(
             (hip_diff * hip_diff + knee_diff * knee_diff) * 0.5 * gate, dtype=get_global_dtype()
         )
@@ -1465,7 +1469,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
 
     def _reward_collision(self, data: dict[str, Any]) -> np.ndarray:
         base_contact = data["base_contact_force"]
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         return np.asarray(
             (base_contact > self._reward_cfg.collision_threshold).astype(get_global_dtype()) * gate,
             dtype=get_global_dtype(),
@@ -1475,12 +1479,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         force = data["wheel_contact_forces"]
         excess = np.clip(force - self._reward_cfg.contact_forces_threshold, 0.0, None) / 100.0
         return np.asarray(
-            np.sum(excess, axis=1) * self._upright_factor(data["projected_gravity"]),
+            np.sum(excess, axis=1) * self._reward_upright_factor(data),
             dtype=get_global_dtype(),
         )
 
     def _reward_upright_wheel_contact(self, data: dict[str, Any]) -> np.ndarray:
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         active = gate >= self._reward_cfg.upright_contact_min_gate
         in_contact = data["wheel_contact_forces"] > self._reward_cfg.upright_contact_force_threshold
         contact_ratio = np.mean(in_contact.astype(get_global_dtype()), axis=1)
@@ -1490,7 +1494,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
 
     def _reward_upright_leg_contact(self, data: dict[str, Any]) -> np.ndarray:
-        gate = self._upright_factor(data["projected_gravity"])
+        gate = self._reward_upright_factor(data)
         active = gate >= self._reward_cfg.upright_contact_min_gate
         leg_contact = data["leg_contact_forces"]
         has_contact = np.any(leg_contact > self._reward_cfg.upright_contact_force_threshold, axis=1)
