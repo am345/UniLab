@@ -14,6 +14,7 @@ from unilab import cli
 from unilab.base import registry
 from unilab.base.registry import apply_cfg_overrides
 from unilab.dr.types import RESET_TERM_KD, RESET_TERM_KP
+from unilab.envs.common.rotation import np_quat_apply_inverse
 from unilab.envs.locomotion.serialleg.flat_mlp import (
     ACTOR_OBS_DIM,
     BAD_ORIENTATION_COS_THRESHOLD,
@@ -244,6 +245,19 @@ def test_serialleg_missing_steps_reuses_zero_steps_buffer() -> None:
     np.testing.assert_array_equal(missing_first, [0, 0])
     assert missing_first.dtype == np.uint32
     assert env._info_steps({"steps": steps}) is steps
+
+
+def test_serialleg_fast_inverse_quat_rotation_matches_common_helper() -> None:
+    env = _serialleg_env_stub(num_envs=8)
+    rng = np.random.default_rng(42)
+    quat = rng.normal(size=(8, 4)).astype(np.float32)
+    quat /= np.linalg.norm(quat, axis=1, keepdims=True)
+    vec = rng.normal(size=(8, 3)).astype(np.float32)
+
+    actual = env._quat_apply_inverse_batch(quat, vec)
+    expected = np_quat_apply_inverse(quat, vec).astype(np.float32)
+
+    np.testing.assert_allclose(actual, expected, rtol=1.0e-6, atol=1.0e-6)
 
 
 def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:

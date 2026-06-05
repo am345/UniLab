@@ -20,7 +20,6 @@ from unilab.dr.dr_utils import (
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import (
     np_matrix_from_quat,
-    np_quat_apply_inverse,
     np_quat_mul,
     np_yaw_to_quat,
 )
@@ -1043,16 +1042,31 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         gravity_w = np.broadcast_to(
             np.asarray([0.0, 0.0, -1.0], dtype=get_global_dtype()), world_linvel.shape
         )
-        base_linvel = np.asarray(
-            np_quat_apply_inverse(base_quat, world_linvel), dtype=get_global_dtype()
-        )
-        base_angvel = np.asarray(
-            np_quat_apply_inverse(base_quat, world_angvel), dtype=get_global_dtype()
-        )
-        projected_gravity = np.asarray(
-            np_quat_apply_inverse(base_quat, gravity_w), dtype=get_global_dtype()
-        )
+        base_linvel = self._quat_apply_inverse_batch(base_quat, world_linvel)
+        base_angvel = self._quat_apply_inverse_batch(base_quat, world_angvel)
+        projected_gravity = self._quat_apply_inverse_batch(base_quat, gravity_w)
         return base_pos, base_linvel, base_angvel, projected_gravity
+
+    def _quat_apply_inverse_batch(self, quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        q = np.asarray(quat, dtype=get_global_dtype())
+        v = np.asarray(vec, dtype=get_global_dtype())
+        w = q[:, 0]
+        x = -q[:, 1]
+        y = -q[:, 2]
+        z = -q[:, 3]
+        vx = v[:, 0]
+        vy = v[:, 1]
+        vz = v[:, 2]
+
+        tx = 2.0 * (y * vz - z * vy)
+        ty = 2.0 * (z * vx - x * vz)
+        tz = 2.0 * (x * vy - y * vx)
+
+        out = np.empty_like(v)
+        out[:, 0] = vx + w * tx + y * tz - z * ty
+        out[:, 1] = vy + w * ty + z * tx - x * tz
+        out[:, 2] = vz + w * tz + x * ty - y * tx
+        return out
 
     def compute_obs_from_arrays(
         self,
