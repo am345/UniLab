@@ -63,6 +63,22 @@ def test_staging_pool_exposes_learner_ready_combined_batch() -> None:
     assert torch.equal(batch["last_obs"], expected_last_obs)
 
 
+def test_staging_pool_keeps_raw_slot_views_contiguous() -> None:
+    pool = RolloutStagingPool(
+        capacity=2,
+        num_envs=_NUM_ENVS,
+        slot_shapes=_SLOT_SHAPES,
+        device="cpu",
+    )
+
+    slot_view = pool._slot_view("obs", 0)
+
+    assert tuple(slot_view.shape) == _SLOT_SHAPES["obs"]
+    assert slot_view.is_contiguous()
+    pool.stage_numpy_views(_raw_rollout(1.0))
+    assert pool.batch()["observations"].shape == (_NUM_STEPS, _NUM_ENVS, _OBS_DIM)
+
+
 def test_staging_pool_reuses_slots_and_drops_overwritten_rollouts() -> None:
     pool = RolloutStagingPool(
         capacity=2,

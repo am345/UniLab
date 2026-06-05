@@ -1,4 +1,4 @@
-"""Bounded rollout staging for APPO learners."""
+"""APPO learner 侧的有界 rollout 暂存池。"""
 
 from __future__ import annotations
 
@@ -15,12 +15,7 @@ _FIELD_ALIASES = {
 
 
 class RolloutStagingPool:
-    """Preallocated learner-device storage for a bounded set of rollouts.
-
-    Raw IPC rollout slots are env-major: [N, T, ...].  Learners consume
-    time-major combined batches: [T, K*N, ...].  The pool owns the destination
-    tensors and exposes active views without rebuilding them via torch.cat.
-    """
+    """预分配 learner-device 存储并复用一组 rollout slot。"""
 
     def __init__(
         self,
@@ -72,8 +67,8 @@ class RolloutStagingPool:
             if len(slot_shape) < 2:
                 raise ValueError(f"rollout field {raw_field!r} must include a time dimension")
             combined_shape = (
-                slot_shape[1],
                 self.capacity * self.num_envs,
+                slot_shape[1],
                 *slot_shape[2:],
             )
         self._buffers[batch_field] = torch.empty(
@@ -89,10 +84,10 @@ class RolloutStagingPool:
         end = start + self.num_envs
         if raw_field in _LAST_FIELDS:
             return storage[start:end]
-        return storage[:, start:end, ...]
+        return storage[start:end, ...]
 
     def stage_numpy_views(self, raw_views: Mapping[str, np.ndarray]) -> int:
-        """Copy one raw shared-memory rollout into the next staging slot."""
+        """把一个 shared-memory rollout 拷入下一个暂存 slot。"""
         missing = self._raw_to_batch_field.keys() - raw_views.keys()
         if missing:
             raise KeyError(f"missing rollout fields for staging: {sorted(missing)}")
@@ -105,9 +100,6 @@ class RolloutStagingPool:
                 raise TypeError(f"rollout field {raw_field!r} must be float32")
 
             src = torch.from_numpy(raw_view)
-            if raw_field not in _LAST_FIELDS:
-                src = src.transpose(0, 1)
-
             dst = self._slot_view(raw_field, slot)
             if tuple(src.shape) != tuple(dst.shape):
                 raise ValueError(
@@ -123,7 +115,7 @@ class RolloutStagingPool:
         return slot
 
     def batch(self) -> dict[str, torch.Tensor]:
-        """Return active learner-ready views backed by the staging pool."""
+        """返回 learner 需要的 time-major batch 视图。"""
         if self._active_count == 0:
             raise RuntimeError("RolloutStagingPool has no active rollouts")
 
@@ -133,5 +125,5 @@ class RolloutStagingPool:
             if field in _LAST_FIELDS:
                 out[field] = storage[:active_envs]
             else:
-                out[field] = storage[:, :active_envs, ...]
+                out[field] = storage[:active_envs, ...].transpose(0, 1)
         return out
