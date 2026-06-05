@@ -896,11 +896,11 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             wheel_sensor_cols.append(int(indices[2]))
 
         rows = np.asarray(env_ids, dtype=np.intp)
-        probe_state = np.asarray(physics_state, dtype=np.float64).copy()
-        probe_state[rows, int(idx_qpos) : int(idx_qpos) + int(nq)] = qpos
-        probe_state[rows, int(idx_qvel) : int(idx_qvel) + int(nv)] = qvel
+        probe_state = np.asarray(physics_state[rows], dtype=np.float64).copy()
+        probe_state[:, int(idx_qpos) : int(idx_qpos) + int(nq)] = qpos
+        probe_state[:, int(idx_qvel) : int(idx_qvel) + int(nv)] = qvel
         sensor_data = pool.forward(probe_state)
-        return np.asarray(sensor_data[rows[:, None], wheel_sensor_cols], dtype=np.float64)
+        return np.asarray(sensor_data[:, wheel_sensor_cols], dtype=np.float64)
 
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
         action = np.asarray(actions, dtype=self._np_dtype)
