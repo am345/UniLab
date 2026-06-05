@@ -51,7 +51,7 @@ FULL_ANGLE_RESET_BBOX_MAX = np.asarray((0.278, 0.242, 0.111), dtype=np.float64)
 
 @dataclass
 class SerialLegOpenChainRecoveryResetConfig:
-    use_tilt_axis_reset: bool = True
+    use_tilt_axis_reset: bool = False
     tilt_range: list[float] = field(default_factory=lambda: [0.0, np.pi])
     tilt_axis_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     pos_xy_range: list[float] = field(default_factory=lambda: [-0.5, 0.5])
@@ -66,42 +66,7 @@ class SerialLegOpenChainRecoveryResetConfig:
     use_iterations: bool = True
     steps_per_policy_iter: int = 16
     offset_iter: int = 0
-    curriculum_stages: list[dict[str, Any]] = field(
-        default_factory=lambda: [
-            {
-                "iteration": 0,
-                "tilt_range": [0.0, 1.05],
-                "lin_vel_range": [-0.05, 0.05],
-                "ang_vel_range": [-0.2, 0.2],
-                "command_lin_vel_x_range": [0.0, 0.0],
-                "command_ang_vel_yaw_range": [0.0, 0.0],
-            },
-            {
-                "iteration": 300,
-                "tilt_range": [0.0, 1.57],
-                "lin_vel_range": [-0.08, 0.08],
-                "ang_vel_range": [-0.35, 0.35],
-                "command_lin_vel_x_range": [-0.3, 0.3],
-                "command_ang_vel_yaw_range": [-0.3, 0.3],
-            },
-            {
-                "iteration": 600,
-                "tilt_range": [0.0, 2.36],
-                "lin_vel_range": [-0.12, 0.12],
-                "ang_vel_range": [-0.6, 0.6],
-                "command_lin_vel_x_range": [-0.6, 0.6],
-                "command_ang_vel_yaw_range": [-0.5, 0.5],
-            },
-            {
-                "iteration": 900,
-                "tilt_range": [0.0, np.pi],
-                "lin_vel_range": [-0.15, 0.15],
-                "ang_vel_range": [-0.8, 0.8],
-                "command_lin_vel_x_range": [-1.0, 1.0],
-                "command_ang_vel_yaw_range": [-1.0, 1.0],
-            },
-        ]
-    )
+    curriculum_stages: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -109,7 +74,8 @@ class SerialLegOpenChainRecoveryRewardConfig(SerialLegOpenChainRewardConfig):
     tracking_lin_vz_weight: float = 0.0
     upward_progress_delta_scale: float = 0.05
     upward_progress_max_reward: float = 2.0
-    tracking_height_sigma: float = 0.05
+    tracking_height_sigma: float = 0.0025
+    tracking_height_use_upright_gate: bool = False
     contact_forces_threshold: float = 35.0
     collision_threshold: float = 0.1
     upright_contact_force_threshold: float = 1.0
@@ -547,7 +513,10 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         return np.asarray(reward, dtype=get_global_dtype())
 
     def _reward_tracking_height(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        if self._reward_cfg.tracking_height_use_upright_gate:
+            gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        else:
+            gate = np.ones((ctx.num_envs,), dtype=get_global_dtype())
         error = np.square(ctx.base_height - self._reward_cfg.base_height_target)
         reward = np.exp(-error / float(self._reward_cfg.tracking_height_sigma))
         return np.asarray(reward * gate, dtype=get_global_dtype())
