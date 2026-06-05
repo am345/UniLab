@@ -35,10 +35,10 @@ from unilab.envs.locomotion.common.dr_provider import LocomotionDRProvider
 from unilab.envs.locomotion.serialleg.fourbar import (
     ACTIVE_LOWER,
     ACTIVE_UPPER,
-    output_to_policy_pos_np,
-    output_to_policy_vel_np,
+    output_to_policy_pos_vel_jacobian_np,
+    output_to_policy_pos_vel_np,
     policy_to_output_pos_np,
-    policy_to_output_torque_np,
+    policy_to_output_torque_from_jacobian_np,
 )
 
 POLICY_JOINT_NAMES: tuple[str, ...] = (
@@ -887,15 +887,20 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         native_vel = self.get_dof_vel()
         output_pos = native_pos[:, OUTPUT_LEG_INDICES]
         output_vel = native_vel[:, OUTPUT_LEG_INDICES]
-        policy_pos = output_to_policy_pos_np(output_pos).astype(self._np_dtype)
-        policy_vel = output_to_policy_vel_np(output_pos, output_vel).astype(self._np_dtype)
+        policy_pos, policy_vel, left_j, right_j = output_to_policy_pos_vel_jacobian_np(
+            output_pos, output_vel
+        )
+        policy_pos = policy_pos.astype(self._np_dtype)
+        policy_vel = policy_vel.astype(self._np_dtype)
         target = (
             delayed[:, :NUM_POLICY_LEG_ACTIONS] * LEG_ACTION_SCALE + self._default_policy_leg_pos
         )
         target = self._clamp_active_rod_angles(target)
         policy_torque = self._leg_kp * (target - policy_pos) - self._leg_kd * policy_vel
         policy_torque = self._clip_active_motor_torque(policy_torque, policy_vel)
-        output_torque = policy_to_output_torque_np(policy_pos, policy_torque).astype(self._np_dtype)
+        output_torque = policy_to_output_torque_from_jacobian_np(
+            policy_torque, left_j, right_j
+        ).astype(self._np_dtype)
 
         wheel_vel = native_vel[:, WHEEL_INDICES]
         wheel_target_vel = delayed[:, NUM_POLICY_LEG_ACTIONS:] * WHEEL_ACTION_SCALE
@@ -928,10 +933,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         wheel_contact_forces = self._wheel_contact_forces()
         output_leg_pos = dof_pos[:, OUTPUT_LEG_INDICES]
         output_leg_vel = dof_vel[:, OUTPUT_LEG_INDICES]
-        policy_leg_pos = output_to_policy_pos_np(output_leg_pos).astype(get_global_dtype())
-        policy_leg_vel = output_to_policy_vel_np(output_leg_pos, output_leg_vel).astype(
-            get_global_dtype()
-        )
+        policy_leg_pos, policy_leg_vel = output_to_policy_pos_vel_np(output_leg_pos, output_leg_vel)
+        policy_leg_pos = policy_leg_pos.astype(get_global_dtype())
+        policy_leg_vel = policy_leg_vel.astype(get_global_dtype())
         self._policy_leg_acc[:] = (
             self._policy_leg_vel - self._last_policy_leg_vel
         ) / self._cfg.ctrl_dt
@@ -1014,14 +1018,14 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         policy_leg_vel: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         num_obs = base_pos.shape[0]
-        if policy_leg_pos is None:
-            policy_leg_pos = output_to_policy_pos_np(dof_pos[:, OUTPUT_LEG_INDICES]).astype(
-                get_global_dtype()
-            )
-        if policy_leg_vel is None:
-            policy_leg_vel = output_to_policy_vel_np(
+        if policy_leg_pos is None or policy_leg_vel is None:
+            computed_policy_pos, computed_policy_vel = output_to_policy_pos_vel_np(
                 dof_pos[:, OUTPUT_LEG_INDICES], dof_vel[:, OUTPUT_LEG_INDICES]
-            ).astype(get_global_dtype())
+            )
+            if policy_leg_pos is None:
+                policy_leg_pos = computed_policy_pos.astype(get_global_dtype())
+            if policy_leg_vel is None:
+                policy_leg_vel = computed_policy_vel.astype(get_global_dtype())
         default_leg_pos = (
             self._default_policy_leg_pos
             if env_ids is None

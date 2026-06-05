@@ -58,20 +58,61 @@ def output_to_policy_vel_np(output_pos: np.ndarray, output_vel: np.ndarray) -> n
     return out.reshape(original_shape)
 
 
+def output_to_policy_pos_vel_np(
+    output_pos: np.ndarray, output_vel: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    policy_pos, policy_vel, _, _ = output_to_policy_pos_vel_jacobian_np(output_pos, output_vel)
+    return policy_pos, policy_vel
+
+
+def output_to_policy_pos_vel_jacobian_np(
+    output_pos: np.ndarray, output_vel: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    pos_arr = np.asarray(output_pos, dtype=np.float64)
+    vel_arr = np.asarray(output_vel, dtype=np.float64)
+    pos_rows = pos_arr.reshape(-1, 4)
+    vel_rows = vel_arr.reshape(-1, 4)
+
+    policy_pos = pos_rows.copy()
+    policy_vel = vel_rows.copy()
+    left_alpha = active_angle_from_output_knee_np(pos_rows[:, 1], right_side=False)
+    right_alpha = active_angle_from_output_knee_np(pos_rows[:, 3], right_side=True)
+    left_j = output_knee_jacobian_np(left_alpha, right_side=False)
+    right_j = output_knee_jacobian_np(right_alpha, right_side=True)
+
+    policy_pos[:, 1] = pos_rows[:, 0] - left_alpha
+    policy_pos[:, 3] = pos_rows[:, 2] + right_alpha
+    policy_vel[:, 1] = vel_rows[:, 0] - vel_rows[:, 1] / _safe_denominator_np(left_j)
+    policy_vel[:, 3] = vel_rows[:, 2] + vel_rows[:, 3] / _safe_denominator_np(right_j)
+    return policy_pos.reshape(pos_arr.shape), policy_vel.reshape(vel_arr.shape), left_j, right_j
+
+
 def policy_to_output_torque_np(policy_pos: np.ndarray, policy_torque: np.ndarray) -> np.ndarray:
     pos = np.asarray(policy_pos, dtype=np.float64).reshape(-1, 4)
     torque_arr = np.asarray(policy_torque, dtype=np.float64)
     original_shape = torque_arr.shape
-    torque_rows = torque_arr.reshape(-1, 4)
-    out = torque_rows.copy()
     left_alpha = np.clip(pos[:, 0] - pos[:, 1], ACTIVE_LOWER, ACTIVE_UPPER)
     right_alpha = np.clip(pos[:, 3] - pos[:, 2], ACTIVE_LOWER, ACTIVE_UPPER)
     left_j = output_knee_jacobian_np(left_alpha, right_side=False)
     right_j = output_knee_jacobian_np(right_alpha, right_side=True)
+    return policy_to_output_torque_from_jacobian_np(torque_arr, left_j, right_j).reshape(
+        original_shape
+    )
+
+
+def policy_to_output_torque_from_jacobian_np(
+    policy_torque: np.ndarray, left_j: np.ndarray, right_j: np.ndarray
+) -> np.ndarray:
+    torque_arr = np.asarray(policy_torque, dtype=np.float64)
+    original_shape = torque_arr.shape
+    torque_rows = torque_arr.reshape(-1, 4)
+    out = torque_rows.copy()
+    left_rows = np.asarray(left_j, dtype=np.float64).reshape(-1)
+    right_rows = np.asarray(right_j, dtype=np.float64).reshape(-1)
     out[:, 0] = torque_rows[:, 0] + torque_rows[:, 1]
-    out[:, 1] = -torque_rows[:, 1] / _safe_denominator_np(left_j)
+    out[:, 1] = -torque_rows[:, 1] / _safe_denominator_np(left_rows)
     out[:, 2] = torque_rows[:, 2] + torque_rows[:, 3]
-    out[:, 3] = torque_rows[:, 3] / _safe_denominator_np(right_j)
+    out[:, 3] = torque_rows[:, 3] / _safe_denominator_np(right_rows)
     return out.reshape(original_shape)
 
 

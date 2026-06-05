@@ -34,7 +34,14 @@ from unilab.envs.locomotion.serialleg.flat_mlp import (
     SerialLegMujocoBackendConfig,
     SerialLegRewardConfig,
 )
-from unilab.envs.locomotion.serialleg.fourbar import policy_to_output_torque_np
+from unilab.envs.locomotion.serialleg.fourbar import (
+    output_to_policy_pos_np,
+    output_to_policy_pos_vel_jacobian_np,
+    output_to_policy_pos_vel_np,
+    output_to_policy_vel_np,
+    policy_to_output_torque_from_jacobian_np,
+    policy_to_output_torque_np,
+)
 from unilab.training.backend_adapter import BackendAdapter
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -115,6 +122,36 @@ def test_serialleg_fourbar_default_pose_matches_se3_reference() -> None:
     )
     assert output_torque.shape == (1, NUM_POLICY_LEG_ACTIONS)
     assert np.isfinite(output_torque).all()
+
+
+def test_serialleg_fourbar_fused_helpers_match_reference_helpers() -> None:
+    output_pos = np.stack(
+        [
+            DEFAULT_OUTPUT_LEG_POS,
+            DEFAULT_OUTPUT_LEG_POS + np.array([0.05, -0.04, -0.05, 0.04], dtype=np.float64),
+        ]
+    )
+    output_vel = np.array(
+        [[0.1, -0.2, 0.3, -0.4], [-1.0, 2.0, -3.0, 4.0]],
+        dtype=np.float64,
+    )
+    policy_torque = np.array(
+        [[1.0, -2.0, 3.0, -4.0], [-5.0, 6.0, -7.0, 8.0]],
+        dtype=np.float64,
+    )
+
+    ref_pos = output_to_policy_pos_np(output_pos)
+    ref_vel = output_to_policy_vel_np(output_pos, output_vel)
+    fused_pos, fused_vel = output_to_policy_pos_vel_np(output_pos, output_vel)
+    jac_pos, jac_vel, left_j, right_j = output_to_policy_pos_vel_jacobian_np(output_pos, output_vel)
+    ref_torque = policy_to_output_torque_np(ref_pos, policy_torque)
+    fused_torque = policy_to_output_torque_from_jacobian_np(policy_torque, left_j, right_j)
+
+    np.testing.assert_allclose(fused_pos, ref_pos, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(fused_vel, ref_vel, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(jac_pos, ref_pos, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(jac_vel, ref_vel, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(fused_torque, ref_torque, rtol=0.0, atol=1.0e-12)
 
 
 def test_serialleg_obs_contract_uses_se3_actor_and_critic_layout() -> None:
