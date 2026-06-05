@@ -1,0 +1,92 @@
+# @package _global_
+training:
+  task_name: SerialLegOpenChainRecovery
+  sim_backend: motrix
+  logger: ${oc.env:SE3_LOGGER,wandb}
+  wandb_project: se3_wheel_leg
+algo:
+  num_envs: 2048
+  max_iterations: 5000
+  save_interval: 100
+  num_steps_per_env: 32
+  empirical_normalization: true
+  obs_groups:
+    actor:
+      - actor
+  policy:
+    init_noise_std: 0.5
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+    activation: elu
+  algorithm:
+    value_loss_coef: 1.0
+    use_clipped_value_loss: true
+    clip_param: 0.2
+    entropy_coef: 0.005
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 6.5e-4
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    max_grad_norm: 1.0
+env:
+  sim_dt: 0.015
+  render_offset_mode: zero
+  motrix_max_iterations: 3
+  commands:
+    vel_limit:
+      - [-1.0, 0.0, -1.0]
+      - [1.0, 0.0, 1.0]
+    resampling_time: 10.0
+    rel_standing_envs: 0.02
+  recovery_reset:
+    pos_xy_range: [-0.5, 0.5]
+    height_offset_range: [0.0, 0.2]
+    roll_range: [-3.141592653589793, 3.141592653589793]
+    pitch_range: [-3.141592653589793, 3.141592653589793]
+    yaw_range: [-3.141592653589793, 3.141592653589793]
+    lin_vel_range: [-0.5, 0.5]
+    ang_vel_range: [-0.5, 0.5]
+    clearance_range: [0.0, 0.05]
+  control_config:
+    leg_action_scale: [0.35, 0.12, 0.35, 0.12]
+    wheel_action_scale: 45.0
+    Kp: 40.0
+    Kd: 2.0
+    wheel_Kd: 0.5
+    clip_actions: 1.0
+  domain_rand:
+    randomize_init_yaw: false
+    randomize_kp: false
+    randomize_kd: false
+    push_robots: false
+reward:
+  scales:
+    tracking_lin_vel: 3.0
+    tracking_ang_vel: 1.5
+    upward: 1.0
+    lin_vel_z: -2.0
+    ang_vel_xy: -0.05
+    action_rate: -0.01
+    leg_torques: -2.5e-5
+    leg_dof_acc: -2.5e-7
+    leg_power: -2.0e-5
+    stand_still: -2.0
+    joint_pos_penalty: -1.0
+    joint_mirror: -0.05
+    dof_pos_limits: -5.0
+    collision: -1.0
+    contact_forces: -1.5e-4
+    upright_leg_contact: -1.0
+    wheel_contact_without_cmd: 0.1
+    diagnostics: 1.0
+  tracking_sigma: 0.25
+  tracking_lin_vz_weight: 0.0
+  base_height_target: 0.22
+  contact_forces_threshold: 35.0
+  collision_threshold: 0.1
+  upright_contact_force_threshold: 1.0
+  upright_contact_min_gate: 0.0
+  wheel_contact_cmd_threshold: 0.1
