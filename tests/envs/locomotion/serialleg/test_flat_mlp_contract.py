@@ -248,6 +248,31 @@ def test_serialleg_action_delay_indices_are_cached_and_updated(
     np.testing.assert_allclose(delayed[:, 0], [10.0, 5.0])
 
 
+def test_serialleg_apply_action_avoids_repeated_zero_default_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _serialleg_env_stub()
+    state = SimpleNamespace(info={})
+    zeros_like_calls = 0
+    real_zeros_like = np.zeros_like
+
+    def counted_zeros_like(array: np.ndarray) -> np.ndarray:
+        nonlocal zeros_like_calls
+        zeros_like_calls += 1
+        return real_zeros_like(array)
+
+    monkeypatch.setattr(np, "zeros_like", counted_zeros_like)
+    first_action = np.ones((2, NUM_ACTIONS), dtype=np.float32)
+    second_action = np.full((2, NUM_ACTIONS), 2.0, dtype=np.float32)
+
+    env.apply_action(first_action, state)
+    env.apply_action(second_action, state)
+
+    assert zeros_like_calls == 1
+    np.testing.assert_allclose(state.info["last_actions"], first_action)
+    np.testing.assert_allclose(state.info["current_actions"], second_action)
+
+
 def test_serialleg_policy_order_torque_buffer_is_reused() -> None:
     env = _serialleg_env_stub()
     env._policy_leg_torque = np.array(

@@ -897,7 +897,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             action = np.asarray(
                 np.clip(action, -float(clip_actions), float(clip_actions)), dtype=self._np_dtype
             )
-        state.info["last_actions"] = state.info.get("current_actions", np.zeros_like(action))
+        previous_actions = state.info.get("current_actions")
+        if previous_actions is None:
+            previous_actions = np.zeros_like(action)
+        state.info["last_actions"] = previous_actions
         state.info["current_actions"] = action
         return action
 
