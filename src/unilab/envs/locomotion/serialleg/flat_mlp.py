@@ -1039,12 +1039,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         base_quat = np.asarray(self._backend.get_base_quat()[rows], dtype=get_global_dtype())
         world_linvel = np.asarray(self._backend.get_base_lin_vel()[rows], dtype=get_global_dtype())
         world_angvel = np.asarray(self._backend.get_base_ang_vel()[rows], dtype=get_global_dtype())
-        gravity_w = np.broadcast_to(
-            np.asarray([0.0, 0.0, -1.0], dtype=get_global_dtype()), world_linvel.shape
-        )
         base_linvel = self._quat_apply_inverse_batch(base_quat, world_linvel)
         base_angvel = self._quat_apply_inverse_batch(base_quat, world_angvel)
-        projected_gravity = self._quat_apply_inverse_batch(base_quat, gravity_w)
+        projected_gravity = self._project_gravity_inverse_batch(base_quat)
         return base_pos, base_linvel, base_angvel, projected_gravity
 
     def _quat_apply_inverse_batch(self, quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
@@ -1066,6 +1063,21 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         out[:, 0] = vx + w * tx + y * tz - z * ty
         out[:, 1] = vy + w * ty + z * tx - x * tz
         out[:, 2] = vz + w * tz + x * ty - y * tx
+        return out
+
+    def _project_gravity_inverse_batch(self, quat: np.ndarray) -> np.ndarray:
+        q = np.asarray(quat, dtype=get_global_dtype())
+        w = q[:, 0]
+        x = -q[:, 1]
+        y = -q[:, 2]
+        z = -q[:, 3]
+
+        tx = -2.0 * y
+        ty = 2.0 * x
+        out = np.empty((q.shape[0], 3), dtype=q.dtype)
+        out[:, 0] = w * tx - z * ty
+        out[:, 1] = w * ty + z * tx
+        out[:, 2] = -1.0 + x * ty - y * tx
         return out
 
     def compute_obs_from_arrays(

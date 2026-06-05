@@ -260,6 +260,19 @@ def test_serialleg_fast_inverse_quat_rotation_matches_common_helper() -> None:
     np.testing.assert_allclose(actual, expected, rtol=1.0e-6, atol=1.0e-6)
 
 
+def test_serialleg_fast_projected_gravity_matches_common_helper() -> None:
+    env = _serialleg_env_stub(num_envs=8)
+    rng = np.random.default_rng(43)
+    quat = rng.normal(size=(8, 4)).astype(np.float32)
+    quat /= np.linalg.norm(quat, axis=1, keepdims=True)
+    gravity = np.broadcast_to(np.array([0.0, 0.0, -1.0], dtype=np.float32), (8, 3))
+
+    actual = env._project_gravity_inverse_batch(quat)
+    expected = np_quat_apply_inverse(quat, gravity).astype(np.float32)
+
+    np.testing.assert_allclose(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+
+
 def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
     env = _serialleg_env_stub()
     dof_pos = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
