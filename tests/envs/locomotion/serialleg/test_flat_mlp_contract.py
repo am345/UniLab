@@ -192,6 +192,21 @@ def test_serialleg_obs_contract_uses_se3_actor_and_critic_layout() -> None:
     assert env.obs_groups_spec == {"obs": ACTOR_OBS_DIM, "critic": CRITIC_OBS_DIM}
 
 
+def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
+    env = _serialleg_env_stub()
+    dof_pos = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
+    dof_vel = np.ones((2, NUM_ACTIONS), dtype=np.float32)
+    env._backend = SimpleNamespace(
+        get_dof_pos=lambda: dof_pos,
+        get_dof_vel=lambda: dof_vel,
+    )
+    env._dof_pos_indices = None
+    env._dof_vel_indices = None
+
+    assert env.get_dof_pos() is dof_pos
+    assert env.get_dof_vel() is dof_vel
+
+
 def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
     class FakePool:
         def __init__(self, sensor_data: np.ndarray) -> None:

@@ -396,6 +396,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             raise ValueError(
                 "SerialLeg native joint qpos order must match NATIVE_JOINT_NAMES for reset qpos"
             )
+        if not np.array_equal(self._dof_vel_indices, expected_indices):
+            raise ValueError(
+                "SerialLeg native joint qvel order must match NATIVE_JOINT_NAMES for control"
+            )
+        self._dof_pos_indices = None
+        self._dof_vel_indices = None
         if self._backend.num_actuators != NUM_ACTIONS:
             raise ValueError(
                 f"SerialLeg requires {NUM_ACTIONS} motor actuators, got {self._backend.num_actuators}"
