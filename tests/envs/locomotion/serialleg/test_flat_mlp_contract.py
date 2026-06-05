@@ -57,12 +57,12 @@ XML_PATH = (
 )
 
 
-def _serialleg_env_stub() -> Any:
+def _serialleg_env_stub(num_envs: int = 2) -> Any:
     env = cast(Any, object.__new__(SerialLegFlatMLPEnv))
     env._cfg = SerialLegFlatMLPCfg(reward_config=SerialLegRewardConfig())
-    env._num_envs = 2
+    env._num_envs = num_envs
     env._np_dtype = np.float32
-    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)).copy()
+    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (num_envs, 4)).copy()
     return env
 
 
@@ -210,42 +210,69 @@ def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
 def test_serialleg_action_delay_indices_are_cached_and_updated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    env = _serialleg_env_stub()
+    env = _serialleg_env_stub(num_envs=3)
     env._np_dtype = np.float32
-    env._leg_kp = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._leg_kd = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)).copy()
-    env._last_motor_ctrl = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
-    env._policy_leg_torque = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._policy_leg_vel = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._policy_leg_pos = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._policy_leg_acc = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._last_policy_leg_vel = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
-    env._bad_orientation_steps = np.zeros((2,), dtype=np.int32)
+    env._leg_kp = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._leg_kd = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (3, 4)).copy()
+    env._last_motor_ctrl = np.zeros((3, NUM_ACTIONS), dtype=np.float32)
+    env._policy_leg_torque = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_vel = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_pos = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_acc = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._last_policy_leg_vel = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._bad_orientation_steps = np.zeros((3,), dtype=np.int32)
     env._cfg.control_config.action_delay_enabled = True
     env._cfg.control_config.randomize_action_delay = True
     env._cfg.control_config.min_action_delay_s = 0.0
     env._cfg.control_config.max_action_delay_s = 0.01
     env._cfg.control_config.action_delay_s = 0.005
-    env._init_action_delay_buffers(num_envs=2)
+    env._init_action_delay_buffers(num_envs=3)
 
-    monkeypatch.setattr(np.random, "randint", lambda *args, **kwargs: np.array([2, 1]))
+    monkeypatch.setattr(np.random, "randint", lambda *args, **kwargs: np.array([0, 1, 2]))
     env.set_reset_runtime(
-        np.array([0, 1], dtype=np.int32),
-        leg_kp=np.ones((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
-        leg_kd=np.ones((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
-        default_policy_leg_pos=np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)),
+        np.array([0, 1, 2], dtype=np.int32),
+        leg_kp=np.ones((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        leg_kd=np.ones((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        default_policy_leg_pos=np.broadcast_to(DEFAULT_POLICY_LEG_POS, (3, 4)),
     )
 
     assert env._env_row_indices.dtype == np.intp
     assert env._delay_steps_intp.dtype == np.intp
-    np.testing.assert_array_equal(env._delay_steps_intp, [2, 1])
+    np.testing.assert_array_equal(env._delay_steps_intp, [0, 1, 2])
 
-    env._action_delay_fifo[0, :, :] = 5.0
-    env._action_delay_fifo[1, :, :] = 10.0
-    delayed = env._select_delayed_actions(np.zeros((2, NUM_ACTIONS), dtype=np.float32))
+    history = [
+        np.zeros((3, NUM_ACTIONS), dtype=np.float32) for _ in range(env._action_delay_fifo.shape[0])
+    ]
+    for frame in range(5):
+        action = np.stack(
+            [
+                np.full((NUM_ACTIONS,), 10.0 * frame + env_id, dtype=np.float32)
+                for env_id in range(3)
+            ],
+            axis=0,
+        )
+        history.insert(0, action.copy())
+        history.pop()
+        delayed = env._select_delayed_actions(action)
+        expected = np.stack([history[delay][env_id] for env_id, delay in enumerate([0, 1, 2])])
+        np.testing.assert_allclose(delayed, expected)
 
-    np.testing.assert_allclose(delayed[:, 0], [10.0, 5.0])
+    env._cfg.control_config.randomize_action_delay = False
+    env._cfg.control_config.action_delay_s = 0.01
+    env._nominal_delay_steps = 2
+    env.set_reset_runtime(
+        np.array([1], dtype=np.int32),
+        leg_kp=np.ones((1, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        leg_kd=np.ones((1, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        default_policy_leg_pos=np.broadcast_to(DEFAULT_POLICY_LEG_POS, (1, 4)),
+    )
+    action = np.full((3, NUM_ACTIONS), 99.0, dtype=np.float32)
+    delayed = env._select_delayed_actions(action)
+
+    assert delayed[1, 0] == pytest.approx(0.0)
+    assert delayed[0, 0] != pytest.approx(0.0)
+    assert delayed[2, 0] != pytest.approx(0.0)
 
 
 def test_serialleg_apply_action_avoids_repeated_zero_default_allocation(

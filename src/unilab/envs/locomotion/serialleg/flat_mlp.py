@@ -517,6 +517,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._delay_steps = np.full((num_envs,), self._nominal_delay_steps, dtype=np.int32)
         self._delay_steps_intp = self._delay_steps.astype(np.intp)
         self._env_row_indices = np.arange(num_envs, dtype=np.intp)
+        self._action_delay_head = 0
+        self._delay_slot_indices = np.zeros((num_envs,), dtype=np.intp)
         self._action_delay_fifo = np.zeros(
             (self._max_delay_steps + 1, num_envs, NUM_ACTIONS), dtype=self._np_dtype
         )
@@ -940,12 +942,18 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         return motor_ctrl
 
     def _select_delayed_actions(self, policy_ctrl: np.ndarray) -> np.ndarray:
-        if self._action_delay_fifo.shape[0] > 1:
-            self._action_delay_fifo[1:] = self._action_delay_fifo[:-1]
-        self._action_delay_fifo[0] = np.asarray(policy_ctrl, dtype=self._np_dtype)
+        head = self._action_delay_head
+        self._action_delay_fifo[head] = np.asarray(policy_ctrl, dtype=self._np_dtype)
+        self._action_delay_head = (head - 1) % self._action_delay_fifo.shape[0]
         if not self._cfg.control_config.action_delay_enabled:
-            return self._action_delay_fifo[0]
-        return self._action_delay_fifo[self._delay_steps_intp, self._env_row_indices]
+            return self._action_delay_fifo[head]
+        np.add(self._delay_steps_intp, head, out=self._delay_slot_indices)
+        np.remainder(
+            self._delay_slot_indices,
+            self._action_delay_fifo.shape[0],
+            out=self._delay_slot_indices,
+        )
+        return self._action_delay_fifo[self._delay_slot_indices, self._env_row_indices]
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._update_commands(state.info)
