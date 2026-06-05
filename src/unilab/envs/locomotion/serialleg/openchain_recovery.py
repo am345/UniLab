@@ -12,6 +12,10 @@ from unilab.dr.dr_utils import zero_actions
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import np_quat_from_euler_xyz, np_quat_mul
 from unilab.envs.locomotion.common import rewards
+from unilab.envs.locomotion.common.commands import (
+    apply_heading_yaw_feedback,
+    sample_heading_commands,
+)
 from unilab.envs.locomotion.common.rewards import RewardContext
 from unilab.envs.locomotion.serialleg.fourbar import ACTIVE_LOWER, ACTIVE_UPPER
 
@@ -47,7 +51,11 @@ FULL_ANGLE_RESET_BBOX_MAX = np.asarray((0.278, 0.242, 0.111), dtype=np.float64)
 
 @dataclass
 class SerialLegOpenChainRecoveryResetConfig:
+    use_tilt_axis_reset: bool = True
+    tilt_range: list[float] = field(default_factory=lambda: [0.0, np.pi])
+    tilt_axis_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     pos_xy_range: list[float] = field(default_factory=lambda: [-0.5, 0.5])
+    height_range: list[float] = field(default_factory=lambda: [0.26, 0.36])
     height_offset_range: list[float] = field(default_factory=lambda: [0.0, 0.2])
     roll_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     pitch_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
@@ -55,11 +63,53 @@ class SerialLegOpenChainRecoveryResetConfig:
     lin_vel_range: list[float] = field(default_factory=lambda: [-0.5, 0.5])
     ang_vel_range: list[float] = field(default_factory=lambda: [-0.5, 0.5])
     clearance_range: list[float] = field(default_factory=lambda: [0.0, 0.05])
+    use_iterations: bool = True
+    steps_per_policy_iter: int = 16
+    offset_iter: int = 0
+    curriculum_stages: list[dict[str, Any]] = field(
+        default_factory=lambda: [
+            {
+                "iteration": 0,
+                "tilt_range": [0.0, 1.05],
+                "lin_vel_range": [-0.05, 0.05],
+                "ang_vel_range": [-0.2, 0.2],
+                "command_lin_vel_x_range": [0.0, 0.0],
+                "command_ang_vel_yaw_range": [0.0, 0.0],
+            },
+            {
+                "iteration": 300,
+                "tilt_range": [0.0, 1.57],
+                "lin_vel_range": [-0.08, 0.08],
+                "ang_vel_range": [-0.35, 0.35],
+                "command_lin_vel_x_range": [-0.3, 0.3],
+                "command_ang_vel_yaw_range": [-0.3, 0.3],
+            },
+            {
+                "iteration": 600,
+                "tilt_range": [0.0, 2.36],
+                "lin_vel_range": [-0.12, 0.12],
+                "ang_vel_range": [-0.6, 0.6],
+                "command_lin_vel_x_range": [-0.6, 0.6],
+                "command_ang_vel_yaw_range": [-0.5, 0.5],
+            },
+            {
+                "iteration": 900,
+                "tilt_range": [0.0, np.pi],
+                "lin_vel_range": [-0.15, 0.15],
+                "ang_vel_range": [-0.8, 0.8],
+                "command_lin_vel_x_range": [-1.0, 1.0],
+                "command_ang_vel_yaw_range": [-1.0, 1.0],
+            },
+        ]
+    )
 
 
 @dataclass
 class SerialLegOpenChainRecoveryRewardConfig(SerialLegOpenChainRewardConfig):
     tracking_lin_vz_weight: float = 0.0
+    upward_progress_delta_scale: float = 0.05
+    upward_progress_max_reward: float = 2.0
+    tracking_height_sigma: float = 0.05
     contact_forces_threshold: float = 35.0
     collision_threshold: float = 0.1
     upright_contact_force_threshold: float = 1.0
@@ -98,6 +148,45 @@ def _sample_range(name: str, values: list[float] | tuple[float, float], shape: t
     return np.random.uniform(low, high, size=shape)
 
 
+def _stage_value(stage: dict[str, Any], name: str, default: Any) -> Any:
+    return stage.get(name, default)
+
+
+def _active_recovery_stage(env: Any, cfg: SerialLegOpenChainRecoveryResetConfig) -> dict[str, Any]:
+    stages = cfg.curriculum_stages
+    if not stages:
+        return {}
+    progress = int(getattr(env, "step_counter", 0))
+    if cfg.use_iterations:
+        progress = progress // max(int(cfg.steps_per_policy_iter), 1) - int(cfg.offset_iter)
+    active = stages[0]
+    key = "iteration" if cfg.use_iterations else "step"
+    for stage in stages:
+        if progress >= int(stage.get(key, stage.get("step", 0))):
+            active = stage
+    return active
+
+
+def _sample_recovery_commands(env: Any, num_samples: int) -> np.ndarray:
+    cfg = env.cfg.recovery_reset
+    stage = _active_recovery_stage(env, cfg)
+    low = np.asarray(env.cfg.commands.vel_limit[0], dtype=get_global_dtype()).copy()
+    high = np.asarray(env.cfg.commands.vel_limit[1], dtype=get_global_dtype()).copy()
+    if "command_lin_vel_x_range" in stage:
+        x_low, x_high = _range_bounds("command_lin_vel_x_range", stage["command_lin_vel_x_range"])
+        low[0], high[0] = x_low, x_high
+    if "command_ang_vel_yaw_range" in stage:
+        yaw_low, yaw_high = _range_bounds(
+            "command_ang_vel_yaw_range", stage["command_ang_vel_yaw_range"]
+        )
+        low[2], high[2] = yaw_low, yaw_high
+    commands = np.asarray(
+        np.random.uniform(low=low, high=high, size=(num_samples, 3)), dtype=get_global_dtype()
+    )
+    commands[:, 1] = 0.0
+    return commands
+
+
 def _quat_z_row(quat: np.ndarray) -> np.ndarray:
     w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     return np.stack(
@@ -117,31 +206,75 @@ def _full_angle_safe_base_height(z_row: np.ndarray, clearance: np.ndarray) -> np
     return -min_z + clearance
 
 
+def _quat_from_horizontal_axis_angle(axis_heading: np.ndarray, angle: np.ndarray) -> np.ndarray:
+    half = 0.5 * angle
+    sin_half = np.sin(half)
+    quat = np.zeros((angle.shape[0], 4), dtype=np.float64)
+    quat[:, 0] = np.cos(half)
+    quat[:, 1] = np.cos(axis_heading) * sin_half
+    quat[:, 2] = np.sin(axis_heading) * sin_half
+    return quat
+
+
 class SerialLegOpenChainRecoveryDomainRandomizationProvider(
     SerialLegOpenChainDomainRandomizationProvider
 ):
+    def _sample_commands(self, env: Any, num_reset: int) -> np.ndarray:
+        return _sample_recovery_commands(env, num_reset)
+
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         num_reset = len(env_ids)
         cfg = env.cfg.recovery_reset
+        stage = _active_recovery_stage(env, cfg)
         qpos = np.tile(env._init_qpos, (num_reset, 1))
         qvel = np.tile(env._init_qvel, (num_reset, 1))
 
-        qpos[:, 0] += _sample_range("pos_xy_range", cfg.pos_xy_range, (num_reset,))
-        qpos[:, 1] += _sample_range("pos_xy_range", cfg.pos_xy_range, (num_reset,))
+        pos_xy_range = _stage_value(stage, "pos_xy_range", cfg.pos_xy_range)
+        qpos[:, 0] += _sample_range("pos_xy_range", pos_xy_range, (num_reset,))
+        qpos[:, 1] += _sample_range("pos_xy_range", pos_xy_range, (num_reset,))
 
-        roll = _sample_range("roll_range", cfg.roll_range, (num_reset,))
-        pitch = _sample_range("pitch_range", cfg.pitch_range, (num_reset,))
-        yaw = _sample_range("yaw_range", cfg.yaw_range, (num_reset,))
-        quat_delta = np_quat_from_euler_xyz(roll, pitch, yaw)
+        yaw_range = _stage_value(stage, "yaw_range", cfg.yaw_range)
+        yaw = _sample_range("yaw_range", yaw_range, (num_reset,))
+        if cfg.use_tilt_axis_reset:
+            tilt = _sample_range(
+                "tilt_range", _stage_value(stage, "tilt_range", cfg.tilt_range), (num_reset,)
+            )
+            tilt_axis = _sample_range(
+                "tilt_axis_range",
+                _stage_value(stage, "tilt_axis_range", cfg.tilt_axis_range),
+                (num_reset,),
+            )
+            tilt_quat = _quat_from_horizontal_axis_angle(tilt_axis, tilt)
+            yaw_quat = np_quat_from_euler_xyz(np.zeros_like(yaw), np.zeros_like(yaw), yaw)
+            quat_delta = np_quat_mul(yaw_quat, tilt_quat)
+        else:
+            roll = _sample_range(
+                "roll_range", _stage_value(stage, "roll_range", cfg.roll_range), (num_reset,)
+            )
+            pitch = _sample_range(
+                "pitch_range", _stage_value(stage, "pitch_range", cfg.pitch_range), (num_reset,)
+            )
+            quat_delta = np_quat_from_euler_xyz(roll, pitch, yaw)
         new_quat = np_quat_mul(qpos[:, 3:7], quat_delta)
 
         z_row = _quat_z_row(new_quat)
-        sampled_height = qpos[:, 2] + _sample_range(
-            "height_offset_range", cfg.height_offset_range, (num_reset,)
-        )
+        if cfg.use_tilt_axis_reset:
+            sampled_height = _sample_range(
+                "height_range", _stage_value(stage, "height_range", cfg.height_range), (num_reset,)
+            )
+        else:
+            sampled_height = qpos[:, 2] + _sample_range(
+                "height_offset_range",
+                _stage_value(stage, "height_offset_range", cfg.height_offset_range),
+                (num_reset,),
+            )
         safe_height = _full_angle_safe_base_height(
             z_row,
-            _sample_range("clearance_range", cfg.clearance_range, (num_reset,)),
+            _sample_range(
+                "clearance_range",
+                _stage_value(stage, "clearance_range", cfg.clearance_range),
+                (num_reset,),
+            ),
         )
 
         origins = env._spawn.origins_for(env_ids)
@@ -151,8 +284,12 @@ class SerialLegOpenChainRecoveryDomainRandomizationProvider(
         qpos[:, 7:] = DEFAULT_SERIALLEG_ANGLES
 
         qvel[:, :] = 0.0
-        qvel[:, 0:3] = _sample_range("lin_vel_range", cfg.lin_vel_range, (num_reset, 3))
-        qvel[:, 3:6] = _sample_range("ang_vel_range", cfg.ang_vel_range, (num_reset, 3))
+        qvel[:, 0:3] = _sample_range(
+            "lin_vel_range", _stage_value(stage, "lin_vel_range", cfg.lin_vel_range), (num_reset, 3)
+        )
+        qvel[:, 3:6] = _sample_range(
+            "ang_vel_range", _stage_value(stage, "ang_vel_range", cfg.ang_vel_range), (num_reset, 3)
+        )
 
         commands = self._sample_commands(env, num_reset)
         standing_prob = float(getattr(env.cfg.commands, "rel_standing_envs", 0.0))
@@ -207,7 +344,14 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         self._zero_leg_contact_forces = np.zeros(
             (num_envs, len(LEG_CONTACT_SENSOR_NAMES)), dtype=get_global_dtype()
         )
+        self._prev_upward_score = np.zeros((num_envs,), dtype=get_global_dtype())
         self._init_domain_randomization(SerialLegOpenChainRecoveryDomainRandomizationProvider())
+
+    def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
+        env_ids = np.asarray(env_indices, dtype=np.int32)
+        obs, info = super().reset(env_ids)
+        self._prev_upward_score[env_ids] = 0.0
+        return obs, info
 
     def _init_reward_functions(self) -> None:
         super()._init_reward_functions()
@@ -226,11 +370,48 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
                 "dof_pos_limits": rewards.joint_pos_limits,
                 "collision": self._reward_collision,
                 "contact_forces": self._reward_contact_forces,
+                "upward_progress": self._reward_upward_progress,
+                "tracking_height": self._reward_tracking_height,
+                "upright_wheel_contact": self._reward_upright_wheel_contact,
                 "upright_leg_contact": self._reward_upright_leg_contact,
                 "wheel_contact_without_cmd": self._reward_wheel_contact_without_cmd,
                 "diagnostics": self._reward_diagnostics,
             }
         )
+
+    def _update_commands(self, info: dict) -> None:
+        commands = info.get("commands")
+        if commands is None:
+            return
+
+        commands_arr = np.asarray(commands, dtype=get_global_dtype())
+        resampling_time = float(getattr(self._cfg.commands, "resampling_time", 0.0))
+        if resampling_time > 0.0:
+            interval_steps = max(int(round(resampling_time / self._cfg.ctrl_dt)), 1)
+            steps = np.asarray(info.get("steps", np.zeros((self._num_envs,), dtype=np.uint32)))
+            resample_mask = (steps > 0) & ((steps % interval_steps) == 0)
+            if np.any(resample_mask):
+                num_resample = int(np.count_nonzero(resample_mask))
+                sampled = _sample_recovery_commands(self, num_resample)
+                standing_prob = float(getattr(self._cfg.commands, "rel_standing_envs", 0.0))
+                if standing_prob > 0.0:
+                    standing = np.random.uniform(size=(num_resample,)) < min(standing_prob, 1.0)
+                    sampled[standing] = 0.0
+                commands_arr[resample_mask] = sampled
+                if getattr(self._cfg.commands, "heading_command", False):
+                    heading_commands = self._ensure_heading_commands(info, commands_arr.shape[0])
+                    heading_commands[resample_mask] = sample_heading_commands(self, num_resample)
+                    info["heading_commands"] = heading_commands
+
+        if getattr(self._cfg.commands, "heading_command", False):
+            heading_commands = self._ensure_heading_commands(info, commands_arr.shape[0])
+            base_quat = np.asarray(self._backend.get_base_quat(), dtype=get_global_dtype())
+            if base_quat.shape[0] == commands_arr.shape[0]:
+                stiffness = float(getattr(self._cfg.commands, "heading_control_stiffness", 0.5))
+                apply_heading_yaw_feedback(
+                    commands_arr, base_quat, heading_commands, stiffness=stiffness
+                )
+        info["commands"] = commands_arr
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._update_commands(state.info)
@@ -347,6 +528,44 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         excess = np.clip(force - self._reward_cfg.contact_forces_threshold, 0.0, None) / 100.0
         return np.asarray(np.sum(excess, axis=1) * gate, dtype=get_global_dtype())
 
+    def _reward_upward_progress(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        score = np.asarray(np.square(1.0 + ctx.gravity[:, 2]), dtype=get_global_dtype())
+        if score.shape != self._prev_upward_score.shape:
+            return np.zeros((ctx.num_envs,), dtype=get_global_dtype())
+        delta = (score - self._prev_upward_score) / float(
+            self._reward_cfg.upward_progress_delta_scale
+        )
+        reward = np.clip(
+            delta,
+            -float(self._reward_cfg.upward_progress_max_reward),
+            float(self._reward_cfg.upward_progress_max_reward),
+        )
+        steps = np.asarray(ctx.info.get("steps", np.zeros((ctx.num_envs,), dtype=np.uint32)))
+        reward = np.where(steps <= 0, 0.0, reward)
+        self._prev_upward_score[:] = score
+        return np.asarray(reward, dtype=get_global_dtype())
+
+    def _reward_tracking_height(self, ctx: RewardContext) -> np.ndarray:
+        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        error = np.square(ctx.base_height - self._reward_cfg.base_height_target)
+        reward = np.exp(-error / float(self._reward_cfg.tracking_height_sigma))
+        return np.asarray(reward * gate, dtype=get_global_dtype())
+
+    def _reward_upright_wheel_contact(self, ctx: RewardContext) -> np.ndarray:
+        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        active = gate >= self._reward_cfg.upright_contact_min_gate
+        wheel_contact = np.asarray(
+            ctx.info.get("wheel_contact_forces", np.zeros((ctx.num_envs, 2))),
+            dtype=get_global_dtype(),
+        )
+        in_contact = wheel_contact > self._reward_cfg.upright_contact_force_threshold
+        contact_ratio = np.mean(in_contact.astype(get_global_dtype()), axis=1)
+        return np.asarray(
+            (1.0 - contact_ratio) * gate * active.astype(get_global_dtype()),
+            dtype=get_global_dtype(),
+        )
+
     def _reward_upright_leg_contact(self, ctx: RewardContext) -> np.ndarray:
         gate = self._upright_gate(ctx.gravity, ctx.num_envs)
         active = gate >= self._reward_cfg.upright_contact_min_gate
@@ -396,6 +615,15 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         try:
             batch = np.asarray(self._backend.get_sensor_data_batch(names), dtype=np.float64)
         except (AttributeError, KeyError, NotImplementedError):
+            base = (
+                self._sensor_scalar(BASE_CONTACT_SENSOR_NAME)
+                if include_base
+                else self._zero_base_contact_force
+            )
+            leg = self._leg_contact_forces() if include_leg else self._zero_leg_contact_forces
+            return base, self._wheel_contact_forces(), leg
+        expected_cols = len(names) * CONTACT_SENSOR_FORCE_DIM
+        if batch.ndim != 2 or batch.shape[1] < expected_cols:
             base = (
                 self._sensor_scalar(BASE_CONTACT_SENSOR_NAME)
                 if include_base
@@ -503,6 +731,14 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
             info.get("current_actions", np.zeros((gravity.shape[0], self._num_action))),
             dtype=get_global_dtype(),
         )
+        reset_cfg = self.cfg.recovery_reset
+        stage = _active_recovery_stage(self, reset_cfg)
+        progress = int(getattr(self, "step_counter", 0))
+        if reset_cfg.use_iterations:
+            progress = progress // max(int(reset_cfg.steps_per_policy_iter), 1) - int(
+                reset_cfg.offset_iter
+            )
+        tilt_range = _stage_value(stage, "tilt_range", reset_cfg.tilt_range)
         active_angle_left = dof_pos[:, 0] - dof_pos[:, 1]
         active_angle_right = dof_pos[:, 4] - dof_pos[:, 3]
         active_margin = np.minimum(
@@ -540,6 +776,10 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
                 ),
                 "Recovery/active_rod_margin_warning_rate": float(
                     np.mean(active_margin < self._reward_cfg.active_rod_margin_warning)
+                ),
+                "Recovery/curriculum_progress": float(progress),
+                "Recovery/curriculum_tilt_max_rad": float(
+                    _range_bounds("tilt_range", tilt_range)[1]
                 ),
             }
         )
