@@ -354,6 +354,7 @@ class APPOLearner:
             target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
         # Also copy buffers (e.g. normalization stats)
         self.sync_target_actor_buffers()
+        clamp_distribution_std(self.target_actor)
 
     def _update_adaptive_learning_rate(self, kl_mean: float) -> None:
         """Update optimizer LR from KL according to the configured adaptive schedule."""
@@ -449,6 +450,7 @@ class APPOLearner:
         # Also cache mu/sigma here so update() doesn't need a second forward pass.
         actions_flat = actions.flatten(0, 1)  # [T*N, A]
         with torch.inference_mode():
+            clamp_distribution_std(self.target_actor)
             self.target_actor(obs_td, stochastic_output=True)
             target_log_probs_flat = self.target_actor.get_output_log_prob(actions_flat)
             batch_dict["_old_mu"] = self.target_actor.output_mean.clone()
