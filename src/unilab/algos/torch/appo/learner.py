@@ -23,6 +23,7 @@ from tensordict import TensorDict
 
 _LOG_2_PI = math.log(2.0 * math.pi)
 _NORMAL_ENTROPY_OFFSET = 0.5 * (1.0 + _LOG_2_PI)
+_LOG_RATIO_LIMIT = 20.0
 
 
 def _distribution_std(distribution: Any, mean: torch.Tensor) -> torch.Tensor:
@@ -53,6 +54,16 @@ def _sample_tensor_for_metric(tensor: torch.Tensor, max_items: int = 8192) -> to
         return flat
     stride = max(flat.numel() // max_items, 1)
     return flat[::stride][:max_items]
+
+
+def _safe_exp_log_ratio(log_ratio: torch.Tensor) -> torch.Tensor:
+    safe_log_ratio = torch.nan_to_num(
+        log_ratio,
+        nan=0.0,
+        posinf=_LOG_RATIO_LIMIT,
+        neginf=-_LOG_RATIO_LIMIT,
+    )
+    return torch.exp(safe_log_ratio.clamp(min=-_LOG_RATIO_LIMIT, max=_LOG_RATIO_LIMIT))
 
 
 def _grad_norm(parameters) -> float:
@@ -111,7 +122,7 @@ def vtrace_advantages(
     with torch.no_grad():
         # IS ratios: ρ_t = π_target(a_t|s_t) / π_behavior(a_t|s_t)
         log_rhos = target_log_probs - behavior_log_probs
-        rhos = torch.exp(log_rhos)
+        rhos = _safe_exp_log_ratio(log_rhos)
         clipped_rhos = torch.clamp(rhos, max=clip_rho)
         cs = torch.clamp(rhos, max=clip_c)
 
@@ -194,6 +205,8 @@ class APPOLearner:
         target_update_freq: int = 1,
         vtrace_clip_rho: float = 1.0,
         vtrace_clip_c: float = 1.0,
+        action_bound_loss_coef: float = 0.0,
+        action_bound_limit: float = 1.0,
         enable_compile: bool = False,
         **kwargs,
     ):
@@ -238,6 +251,8 @@ class APPOLearner:
         self.target_update_freq = target_update_freq
         self.vtrace_clip_rho = vtrace_clip_rho
         self.vtrace_clip_c = vtrace_clip_c
+        self.action_bound_loss_coef = float(action_bound_loss_coef)
+        self.action_bound_limit = float(action_bound_limit)
         self._update_counter = 0
         self.last_update_metrics: dict[str, float] = {}
         self.enable_compile = (
@@ -314,14 +329,17 @@ class APPOLearner:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ]:
         mu, sigma, value = self._minibatch_policy_value(obs_mini, critic_obs_mini)
         current_log_prob = self._gaussian_log_prob(actions_mini, mu, sigma)
         entropy = self._gaussian_entropy(sigma).mean()
 
         with torch.no_grad():
-            clipped_rho = torch.clamp(torch.exp(behavior_logp_mini - target_logp_mini), max=1.0)
-        ratio = clipped_rho * torch.exp(current_log_prob - behavior_logp_mini)
+            clipped_rho = torch.clamp(
+                _safe_exp_log_ratio(behavior_logp_mini - target_logp_mini), max=1.0
+            )
+        ratio = clipped_rho * _safe_exp_log_ratio(current_log_prob - behavior_logp_mini)
 
         surrogate = -advantages_mini * ratio
         surrogate_clipped = -advantages_mini * torch.clamp(
@@ -347,8 +365,27 @@ class APPOLearner:
         )
         kl_mean = torch.mean(kl)
 
-        loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
-        return loss, surrogate_loss, value_loss, entropy, kl_mean, current_log_prob, ratio
+        if self.action_bound_loss_coef > 0.0:
+            action_bound_loss = torch.relu(mu.abs() - self.action_bound_limit).pow(2).mean()
+        else:
+            action_bound_loss = mu.new_zeros(())
+
+        loss = (
+            surrogate_loss
+            + self.value_loss_coef * value_loss
+            - self.entropy_coef * entropy
+            + self.action_bound_loss_coef * action_bound_loss
+        )
+        return (
+            loss,
+            surrogate_loss,
+            value_loss,
+            entropy,
+            kl_mean,
+            current_log_prob,
+            ratio,
+            action_bound_loss,
+        )
 
     def train_mode(self):
         """Set actor/critic to training mode (enables EmpiricalNormalization.update)."""
@@ -469,7 +506,7 @@ class APPOLearner:
             batch_dict["_old_sigma"] = target_sigma.clone()
         target_log_probs = target_log_probs_flat.view(T, N)
         with torch.inference_mode():
-            rhos = torch.exp(target_log_probs - behavior_log_probs)
+            rhos = _safe_exp_log_ratio(target_log_probs - behavior_log_probs)
             rho_sample = _sample_tensor_for_metric(rhos)
             batch_dict["_appo_process_metrics"] = {
                 "vtrace/rho_clip_fraction": float(
@@ -548,6 +585,7 @@ class APPOLearner:
         mean_behavior_to_current_kl = 0.0
         mean_target_to_current_kl = 0.0
         mean_global_grad_norm = 0.0
+        mean_action_bound_loss = 0.0
         num_updates = 0
         skipped_nonfinite_updates = 0
 
@@ -578,6 +616,7 @@ class APPOLearner:
                     kl_mean,
                     current_log_prob,
                     ratio,
+                    action_bound_loss,
                 ) = self._minibatch_loss_fn(
                     obs_mini,
                     critic_obs_mini,
@@ -629,6 +668,7 @@ class APPOLearner:
                 mean_clip_fraction += float(clip_fraction)
                 mean_behavior_to_current_kl += float(behavior_to_current_kl)
                 mean_global_grad_norm += global_grad_norm
+                mean_action_bound_loss += action_bound_loss.item()
                 num_updates += 1
 
         self._update_counter += 1
@@ -646,6 +686,7 @@ class APPOLearner:
             "kl": mean_kl / num_updates if self.schedule == "adaptive" else 0.0,
             "loss/policy_loss": mean_surrogate_loss / num_updates,
             "loss/value_loss": mean_value_loss / num_updates,
+            "loss/action_bound_loss": mean_action_bound_loss / num_updates,
             "policy/entropy": mean_entropy / num_updates,
             "ppo/approx_kl": mean_target_to_current_kl / num_updates,
             "ppo/clip_fraction": mean_clip_fraction / num_updates,
