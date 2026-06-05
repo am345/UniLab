@@ -338,6 +338,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
                 "dof_pos_limits": rewards.joint_pos_limits,
                 "collision": self._reward_collision,
                 "contact_forces": self._reward_contact_forces,
+                "upward": self._reward_upward,
                 "upward_progress": self._reward_upward_progress,
                 "tracking_height": self._reward_tracking_height,
                 "upright_wheel_contact": self._reward_upright_wheel_contact,
@@ -508,6 +509,10 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         )
         excess = np.clip(force - self._reward_cfg.contact_forces_threshold, 0.0, None) / 100.0
         return np.asarray(np.sum(excess, axis=1) * gate, dtype=get_global_dtype())
+
+    def _reward_upward(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        return np.asarray(np.square(1.0 - ctx.gravity[:, 2]), dtype=get_global_dtype())
 
     def _reward_upward_progress(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.gravity is not None
