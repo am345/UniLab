@@ -84,6 +84,20 @@ def _average_timing_ms(
     }
 
 
+def _record_env_timing_ms(
+    timing_accum_ms: dict[str, float],
+    timing_counts: dict[str, int],
+    env_timing: Any,
+) -> None:
+    if not isinstance(env_timing, dict):
+        return
+    for key, value in env_timing.items():
+        if not isinstance(value, int | float | np.integer | np.floating):
+            continue
+        timing_key = "env_inner_step_total_ms" if key == "env_step_total_ms" else f"env_{key}"
+        _record_timing_ms(timing_accum_ms, timing_counts, timing_key, float(value))
+
+
 def compute_timeout_bootstrap_correction(
     critic: Any,
     collector_device: str,
@@ -329,6 +343,11 @@ def appo_collector_fn(
                     timing_counts,
                     "env_step_total_ms",
                     phase_start_ns,
+                )
+                _record_env_timing_ms(
+                    timing_accum_ms,
+                    timing_counts,
+                    state.info.get("timing", {}),
                 )
 
                 next_obs_raw = state.obs
