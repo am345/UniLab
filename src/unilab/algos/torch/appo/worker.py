@@ -497,17 +497,22 @@ def appo_collector_fn(
                     if k.startswith(("reward/", "Recovery/")) and np.isfinite(v):
                         ep_reward_components[k].append(float(v))
 
-                if metrics_queue is not None and total_steps % (num_envs * 10) == 0 and ep_rewards:
+                if metrics_queue is not None and total_steps % (num_envs * 10) == 0:
                     try:
                         msg = {
                             "worker_index": worker_index,
                             "worker_name": worker_label,
-                            "total_steps": total_steps,
-                            "mean_ep_reward": statistics.mean(ep_rewards[-100:]),
-                            "mean_ep_length": statistics.mean(ep_lengths[-100:])
-                            if ep_lengths
-                            else 0.0,
                         }
+                        if ep_rewards:
+                            msg.update(
+                                {
+                                    "total_steps": total_steps,
+                                    "mean_ep_reward": statistics.mean(ep_rewards[-100:]),
+                                    "mean_ep_length": statistics.mean(ep_lengths[-100:])
+                                    if ep_lengths
+                                    else 0.0,
+                                }
+                            )
                         # Episode completion mode rates
                         total_ep = ep_timeouts + ep_terminates
                         if total_ep > 0:
