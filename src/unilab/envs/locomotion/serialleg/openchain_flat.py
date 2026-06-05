@@ -63,6 +63,8 @@ DEFAULT_SERIALLEG_ANGLES = np.asarray(
     dtype=np.float64,
 )
 DEFAULT_BASE_HEIGHT = 0.22
+SERIALLEG_FORCE_LOWER = np.asarray([-40.0, -40.0, -2.210526315789, -40.0, -40.0, -2.210526315789])
+SERIALLEG_FORCE_UPPER = np.asarray([40.0, 40.0, 2.210526315789, 40.0, 40.0, 2.210526315789])
 
 
 @dataclass
@@ -133,7 +135,10 @@ class SerialLegOpenChainFlatCfg(LocomotionBaseCfg):
     scene: SceneCfg = field(
         default_factory=lambda: SceneCfg(
             model_file=str(
-                ASSETS_ROOT_PATH / "robots" / "serialleg" / "serialleg_fourbar_surrogate_train.xml"
+                ASSETS_ROOT_PATH
+                / "robots"
+                / "serialleg"
+                / "serialleg_openchain_direct_actuator.xml"
             )
         )
     )
@@ -225,9 +230,6 @@ class SerialLegOpenChainDomainRandomizationProvider(LocomotionDRProvider):
         qpos[:, 7:] = DEFAULT_SERIALLEG_ANGLES
         qvel[:, :] = 0.0
 
-        motor_kp, motor_kd = env.sample_reset_motor_gains(num_reset)
-        env.set_motor_gains(env_ids, motor_kp, motor_kd)
-
         commands = self._sample_commands(env, num_reset)
         zero_small_xy_commands(commands)
         standing_prob = float(getattr(env.cfg.commands, "rel_standing_envs", 0.0))
@@ -239,8 +241,9 @@ class SerialLegOpenChainDomainRandomizationProvider(LocomotionDRProvider):
             "commands": commands,
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
-            "motor_kp": motor_kp.astype(get_global_dtype()),
-            "motor_kd": motor_kd.astype(get_global_dtype()),
+            "current_ctrl": np.broadcast_to(
+                DEFAULT_SERIALLEG_ANGLES, (num_reset, NUM_SERIALLEG_ACTIONS)
+            ).astype(get_global_dtype()),
             "torques": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
         }
         if getattr(env.cfg.commands, "heading_command", False):
@@ -269,27 +272,6 @@ class SerialLegOpenChainDomainRandomizationProvider(LocomotionDRProvider):
             dict[str, np.ndarray],
             env._compute_obs(info_updates, linvel, gyro, gravity, dof_pos, dof_vel),
         )
-
-
-def compute_serialleg_openchain_motor_ctrl(
-    policy_ctrl: np.ndarray,
-    joint_pos: np.ndarray,
-    joint_vel: np.ndarray,
-    leg_kp: np.ndarray,
-    leg_kd: np.ndarray,
-    wheel_kd: np.ndarray,
-    ctrl_lower: np.ndarray,
-    ctrl_upper: np.ndarray,
-    out: np.ndarray,
-) -> np.ndarray:
-    out[:, 0:2] = leg_kp[:, 0:2] * (policy_ctrl[:, 0:2] - joint_pos[:, 0:2])
-    out[:, 0:2] -= leg_kd[:, 0:2] * joint_vel[:, 0:2]
-    out[:, 3:5] = leg_kp[:, 2:4] * (policy_ctrl[:, 3:5] - joint_pos[:, 3:5])
-    out[:, 3:5] -= leg_kd[:, 2:4] * joint_vel[:, 3:5]
-    out[:, 2] = wheel_kd[:, 0] * (policy_ctrl[:, 2] - joint_vel[:, 2])
-    out[:, 5] = wheel_kd[:, 1] * (policy_ctrl[:, 5] - joint_vel[:, 5])
-    np.clip(out, ctrl_lower, ctrl_upper, out=out)
-    return out
 
 
 @registry.env("SerialLegOpenChainFlat", sim_backend="mujoco")
@@ -323,35 +305,18 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
         self._validate_motor_control_contract(ctrl_range)
         self._ctrl_lower = ctrl_range[:, 0].astype(self._np_dtype)
         self._ctrl_upper = ctrl_range[:, 1].astype(self._np_dtype)
+        self._force_lower = SERIALLEG_FORCE_LOWER.astype(self._np_dtype)
+        self._force_upper = SERIALLEG_FORCE_UPPER.astype(self._np_dtype)
         joint_range = self._backend.get_joint_range()
         self._leg_joint_range = (
             np.asarray(joint_range[SERIALLEG_LEG_INDICES], dtype=get_global_dtype())
             if joint_range is not None
             else None
         )
-        self._base_motor_kp = np.full(
-            (NUM_SERIALLEG_LEG_ACTIONS,), cfg.control_config.Kp, dtype=np.float64
-        )
-        self._base_motor_kd = np.full(
-            (NUM_SERIALLEG_LEG_ACTIONS,), cfg.control_config.Kd, dtype=np.float64
-        )
-        self._base_wheel_kd = np.full(
-            (NUM_SERIALLEG_WHEEL_ACTIONS,), cfg.control_config.wheel_Kd, dtype=np.float64
-        )
-        self._motor_kp = np.broadcast_to(
-            self._base_motor_kp, (num_envs, NUM_SERIALLEG_LEG_ACTIONS)
-        ).copy()
-        self._motor_kd = np.broadcast_to(
-            self._base_motor_kd, (num_envs, NUM_SERIALLEG_LEG_ACTIONS)
-        ).copy()
-        self._wheel_kd = np.broadcast_to(
-            self._base_wheel_kd, (num_envs, NUM_SERIALLEG_WHEEL_ACTIONS)
-        ).copy()
-        self._last_motor_ctrl = np.zeros((num_envs, NUM_SERIALLEG_ACTIONS), dtype=self._np_dtype)
+        self._torque_estimate = np.zeros((num_envs, NUM_SERIALLEG_ACTIONS), dtype=self._np_dtype)
         self._last_dof_vel_for_acc = np.zeros(
             (num_envs, NUM_SERIALLEG_ACTIONS), dtype=get_global_dtype()
         )
-        self._backend.set_pre_step_control(self._pre_step_motor_control)
         self._init_reward_functions()
         self._init_domain_randomization(SerialLegOpenChainDomainRandomizationProvider())
 
@@ -382,7 +347,7 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
     def _validate_motor_control_contract(self, ctrl_range: np.ndarray) -> None:
         if self._backend.num_actuators != NUM_SERIALLEG_ACTIONS:
             raise ValueError(
-                f"SerialLeg requires {NUM_SERIALLEG_ACTIONS} motor actuators, got {self._backend.num_actuators}"
+                f"SerialLeg requires {NUM_SERIALLEG_ACTIONS} direct actuators, got {self._backend.num_actuators}"
             )
         if ctrl_range.shape != (NUM_SERIALLEG_ACTIONS, 2):
             raise ValueError(
@@ -430,22 +395,6 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
             "wheel_vel": self._reward_wheel_vel,
         }
 
-    def sample_reset_motor_gains(self, num_reset: int) -> tuple[np.ndarray, np.ndarray]:
-        kp = np.broadcast_to(self._base_motor_kp, (num_reset, NUM_SERIALLEG_LEG_ACTIONS)).copy()
-        kd = np.broadcast_to(self._base_motor_kd, (num_reset, NUM_SERIALLEG_LEG_ACTIONS)).copy()
-        domain_rand = self._cfg.domain_rand
-        if domain_rand.randomize_kp:
-            low, high = domain_rand.kp_multiplier_range
-            kp *= np.random.uniform(low, high, size=(num_reset, 1))
-        if domain_rand.randomize_kd:
-            low, high = domain_rand.kd_multiplier_range
-            kd *= np.random.uniform(low, high, size=(num_reset, 1))
-        return kp, kd
-
-    def set_motor_gains(self, env_ids: np.ndarray, kp: np.ndarray, kd: np.ndarray) -> None:
-        self._motor_kp[env_ids] = np.asarray(kp, dtype=np.float64)
-        self._motor_kd[env_ids] = np.asarray(kd, dtype=np.float64)
-
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
         clipped_actions = np.asarray(
             np.clip(
@@ -470,21 +419,9 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
         ctrl[:, 3:5] = exec_actions[:, 3:5] * self._leg_action_scale[2:4] + self.default_angles[3:5]
         ctrl[:, 2] = exec_actions[:, 2] * self._cfg.control_config.wheel_action_scale
         ctrl[:, 5] = exec_actions[:, 5] * self._cfg.control_config.wheel_action_scale
+        np.clip(ctrl, self._ctrl_lower, self._ctrl_upper, out=ctrl)
+        state.info["current_ctrl"] = ctrl
         return ctrl
-
-    def _pre_step_motor_control(self, backend: Any, policy_ctrl: np.ndarray) -> np.ndarray:
-        del backend
-        return compute_serialleg_openchain_motor_ctrl(
-            policy_ctrl,
-            self.get_dof_pos(),
-            self.get_dof_vel(),
-            self._motor_kp,
-            self._motor_kd,
-            self._wheel_kd,
-            self._ctrl_lower,
-            self._ctrl_upper,
-            self._last_motor_ctrl,
-        )
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._update_commands(state.info)
@@ -493,7 +430,7 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
         gravity = self._backend.get_sensor_data(self._cfg.sensor.gravity)
         dof_pos = self.get_dof_pos()
         dof_vel = self.get_dof_vel()
-        state.info["torques"] = self._last_motor_ctrl.copy()
+        state.info["torques"] = self._estimate_direct_actuator_torques(state.info, dof_pos, dof_vel)
         state.info["qacc"] = self._estimate_dof_acc(dof_vel)
         terminated = self._compute_terminated(gravity)
         reward = self._compute_reward(state.info, linvel, gyro, gravity, dof_pos, dof_vel)
@@ -637,6 +574,28 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
         qacc = np.asarray((dof_vel - self._last_dof_vel_for_acc) / self._cfg.ctrl_dt)
         self._last_dof_vel_for_acc[:] = dof_vel
         return np.asarray(qacc, dtype=get_global_dtype())
+
+    def _estimate_direct_actuator_torques(
+        self, info: dict, dof_pos: np.ndarray, dof_vel: np.ndarray
+    ) -> np.ndarray:
+        ctrl = np.asarray(
+            info.get(
+                "current_ctrl",
+                np.broadcast_to(
+                    DEFAULT_SERIALLEG_ANGLES, (dof_pos.shape[0], NUM_SERIALLEG_ACTIONS)
+                ),
+            ),
+            dtype=self._np_dtype,
+        )
+        torque = self._torque_estimate
+        torque[:, 0:2] = self._cfg.control_config.Kp * (ctrl[:, 0:2] - dof_pos[:, 0:2])
+        torque[:, 0:2] -= self._cfg.control_config.Kd * dof_vel[:, 0:2]
+        torque[:, 3:5] = self._cfg.control_config.Kp * (ctrl[:, 3:5] - dof_pos[:, 3:5])
+        torque[:, 3:5] -= self._cfg.control_config.Kd * dof_vel[:, 3:5]
+        torque[:, 2] = self._cfg.control_config.wheel_Kd * (ctrl[:, 2] - dof_vel[:, 2])
+        torque[:, 5] = self._cfg.control_config.wheel_Kd * (ctrl[:, 5] - dof_vel[:, 5])
+        np.clip(torque, self._force_lower, self._force_upper, out=torque)
+        return torque.copy()
 
     def _reward_base_height_values(self, num_obs: int) -> np.ndarray:
         base_pos = np.asarray(self._backend.get_base_pos(), dtype=get_global_dtype())
