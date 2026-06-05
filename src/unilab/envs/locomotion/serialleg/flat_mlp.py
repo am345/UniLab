@@ -926,6 +926,12 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         dof_pos = self.get_dof_pos()
         dof_vel = self.get_dof_vel()
         wheel_contact_forces = self._wheel_contact_forces()
+        output_leg_pos = dof_pos[:, OUTPUT_LEG_INDICES]
+        output_leg_vel = dof_vel[:, OUTPUT_LEG_INDICES]
+        policy_leg_pos = output_to_policy_pos_np(output_leg_pos).astype(get_global_dtype())
+        policy_leg_vel = output_to_policy_vel_np(output_leg_pos, output_leg_vel).astype(
+            get_global_dtype()
+        )
         self._policy_leg_acc[:] = (
             self._policy_leg_vel - self._last_policy_leg_vel
         ) / self._cfg.ctrl_dt
@@ -937,7 +943,14 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         state.info["policy_leg_acc"] = self._policy_leg_acc.copy()
         state.info["wheel_contact_forces"] = wheel_contact_forces
         terminated = self._compute_terminated(
-            base_pos, base_linvel, base_angvel, projected_gravity, dof_pos, dof_vel
+            base_pos,
+            base_linvel,
+            base_angvel,
+            projected_gravity,
+            dof_pos,
+            dof_vel,
+            policy_leg_pos,
+            policy_leg_vel,
         )
         reward = self._compute_reward(
             state.info,
@@ -948,6 +961,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             dof_pos,
             dof_vel,
             wheel_contact_forces,
+            policy_leg_pos,
+            policy_leg_vel,
         )
         obs = self.compute_obs_from_arrays(
             state.info,
@@ -957,6 +972,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             projected_gravity,
             dof_pos,
             dof_vel,
+            policy_leg_pos=policy_leg_pos,
+            policy_leg_vel=policy_leg_vel,
         )
         return state.replace(obs=obs, reward=reward, terminated=terminated)
 
@@ -993,14 +1010,18 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         dof_vel: np.ndarray,
         *,
         env_ids: np.ndarray | None = None,
+        policy_leg_pos: np.ndarray | None = None,
+        policy_leg_vel: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
         num_obs = base_pos.shape[0]
-        policy_leg_pos = output_to_policy_pos_np(dof_pos[:, OUTPUT_LEG_INDICES]).astype(
-            get_global_dtype()
-        )
-        policy_leg_vel = output_to_policy_vel_np(
-            dof_pos[:, OUTPUT_LEG_INDICES], dof_vel[:, OUTPUT_LEG_INDICES]
-        ).astype(get_global_dtype())
+        if policy_leg_pos is None:
+            policy_leg_pos = output_to_policy_pos_np(dof_pos[:, OUTPUT_LEG_INDICES]).astype(
+                get_global_dtype()
+            )
+        if policy_leg_vel is None:
+            policy_leg_vel = output_to_policy_vel_np(
+                dof_pos[:, OUTPUT_LEG_INDICES], dof_vel[:, OUTPUT_LEG_INDICES]
+            ).astype(get_global_dtype())
         default_leg_pos = (
             self._default_policy_leg_pos
             if env_ids is None
@@ -1100,6 +1121,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         dof_pos: np.ndarray,
         dof_vel: np.ndarray,
         wheel_contact_forces: np.ndarray,
+        policy_leg_pos: np.ndarray,
+        policy_leg_vel: np.ndarray,
     ) -> np.ndarray:
         data = {
             "info": info,
@@ -1110,12 +1133,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             "dof_pos": dof_pos,
             "dof_vel": dof_vel,
             "wheel_contact_forces": wheel_contact_forces,
-            "policy_leg_pos": output_to_policy_pos_np(dof_pos[:, OUTPUT_LEG_INDICES]).astype(
-                get_global_dtype()
-            ),
-            "policy_leg_vel": output_to_policy_vel_np(
-                dof_pos[:, OUTPUT_LEG_INDICES], dof_vel[:, OUTPUT_LEG_INDICES]
-            ).astype(get_global_dtype()),
+            "policy_leg_pos": policy_leg_pos,
+            "policy_leg_vel": policy_leg_vel,
         }
         reward = np.zeros((base_pos.shape[0],), dtype=get_global_dtype())
         step_count = info.get("steps", np.zeros((self._num_envs,), dtype=np.uint32))
@@ -1142,6 +1161,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         projected_gravity: np.ndarray,
         dof_pos: np.ndarray,
         dof_vel: np.ndarray,
+        policy_leg_pos: np.ndarray,
+        policy_leg_vel: np.ndarray,
     ) -> np.ndarray:
         finite = (
             np.isfinite(base_pos).all(axis=1)
@@ -1150,10 +1171,6 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             & np.isfinite(projected_gravity).all(axis=1)
             & np.isfinite(dof_pos).all(axis=1)
             & np.isfinite(dof_vel).all(axis=1)
-        )
-        policy_leg_pos = output_to_policy_pos_np(dof_pos[:, OUTPUT_LEG_INDICES])
-        policy_leg_vel = output_to_policy_vel_np(
-            dof_pos[:, OUTPUT_LEG_INDICES], dof_vel[:, OUTPUT_LEG_INDICES]
         )
         leg_pos_bad = np.any(np.abs(policy_leg_pos - self._default_policy_leg_pos) > 3.0, axis=1)
         leg_vel_bad = np.any(np.abs(policy_leg_vel) > 120.0, axis=1)
