@@ -58,7 +58,7 @@ env:
     resampling_time: 10.0
     rel_standing_envs: 0.02
   recovery_reset:
-    use_tilt_axis_reset: false
+    use_tilt_axis_reset: true
     tilt_range: [0.0, 3.141592653589793]
     tilt_axis_range: [-3.141592653589793, 3.141592653589793]
     pos_xy_range: [-0.5, 0.5]
@@ -67,13 +67,37 @@ env:
     roll_range: [-3.141592653589793, 3.141592653589793]
     pitch_range: [-3.141592653589793, 3.141592653589793]
     yaw_range: [-3.141592653589793, 3.141592653589793]
-    lin_vel_range: [-0.5, 0.5]
-    ang_vel_range: [-0.5, 0.5]
-    clearance_range: [0.0, 0.05]
+    lin_vel_range: [-0.15, 0.15]
+    ang_vel_range: [-0.8, 0.8]
+    clearance_range: [0.02, 0.05]
     use_iterations: true
     steps_per_policy_iter: 16
     offset_iter: 0
-    curriculum_stages: []
+    curriculum_stages:
+      - iteration: 0
+        tilt_range: [0.0, 1.05]
+        lin_vel_range: [-0.05, 0.05]
+        ang_vel_range: [-0.2, 0.2]
+        command_lin_vel_x_range: [0.0, 0.0]
+        command_ang_vel_yaw_range: [0.0, 0.0]
+      - iteration: 300
+        tilt_range: [0.0, 1.57]
+        lin_vel_range: [-0.08, 0.08]
+        ang_vel_range: [-0.35, 0.35]
+        command_lin_vel_x_range: [-0.3, 0.3]
+        command_ang_vel_yaw_range: [-0.3, 0.3]
+      - iteration: 700
+        tilt_range: [0.0, 2.36]
+        lin_vel_range: [-0.12, 0.12]
+        ang_vel_range: [-0.6, 0.6]
+        command_lin_vel_x_range: [-0.5, 0.5]
+        command_ang_vel_yaw_range: [-0.5, 0.5]
+      - iteration: 1100
+        tilt_range: [0.0, 3.141592653589793]
+        lin_vel_range: [-0.15, 0.15]
+        ang_vel_range: [-0.8, 0.8]
+        command_lin_vel_x_range: [-1.0, 1.0]
+        command_ang_vel_yaw_range: [-0.5, 0.5]
   control_config:
     leg_action_scale: [0.45, 0.35, 0.45, 0.35]
     wheel_action_scale: 45.0
