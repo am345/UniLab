@@ -86,9 +86,9 @@ reward:
     dof_pos_limits: -5.0
     collision: -1.0
     contact_forces: -1.5e-4
-    upright_wheel_contact: -1.0
-    upright_leg_contact: -4.0
-    wheel_contact_without_cmd: 0.3
+    upright_wheel_contact: -0.5
+    upright_leg_contact: -1.0
+    wheel_contact_without_cmd: 0.2
     diagnostics: 1.0
   tracking_sigma: 0.25
   tracking_lin_vz_weight: 0.0
