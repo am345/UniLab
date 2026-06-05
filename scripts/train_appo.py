@@ -131,6 +131,50 @@ def run_motrix_play_loop(
         )
 
 
+def _action_bounds_for_play(
+    env: Any, action_dim: int, device: str
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    action_space = getattr(env, "action_space", None)
+    low = getattr(action_space, "low", None)
+    high = getattr(action_space, "high", None)
+    if low is None or high is None:
+        return None
+    import numpy as np
+
+    low_np = np.asarray(low, dtype=np.float32)
+    high_np = np.asarray(high, dtype=np.float32)
+    try:
+        low_np = np.broadcast_to(low_np, (action_dim,)).copy()
+        high_np = np.broadcast_to(high_np, (action_dim,)).copy()
+    except ValueError:
+        return None
+    if not (np.all(np.isfinite(low_np)) and np.all(np.isfinite(high_np))):
+        return None
+    return torch.from_numpy(low_np).to(device), torch.from_numpy(high_np).to(device)
+
+
+def _bounded_action_mean_for_play(
+    mean: torch.Tensor,
+    action_bounds: tuple[torch.Tensor, torch.Tensor] | None,
+    action_bound_limit: float,
+) -> torch.Tensor:
+    if action_bounds is None:
+        return float(action_bound_limit) * torch.tanh(mean / float(action_bound_limit))
+    low_torch, high_torch = action_bounds
+    center = 0.5 * (low_torch + high_torch)
+    half_width = (0.5 * (high_torch - low_torch)).clamp_min(1e-6)
+    return center + half_width * torch.tanh((mean - center) / half_width)
+
+
+def _distribution_std_for_play(actor: Any, mean: torch.Tensor) -> torch.Tensor:
+    distribution = actor.distribution
+    if distribution.std_type == "scalar":
+        std = distribution.std_param.expand_as(mean)
+    else:
+        std = torch.exp(distribution.log_std_param).expand_as(mean)
+    return torch.nan_to_num(std, nan=0.05, posinf=2.0, neginf=0.05).clamp(min=0.05, max=2.0)
+
+
 def resolve_appo_checkpoint_path(
     base_log_dir: str | Path,
     load_run: str | int,
@@ -294,7 +338,37 @@ def play_appo(
     clamp_distribution_std(actor)
     _warn_if_play_commit_mismatch(load_path_dir)
     play_stochastic = bool(getattr(cfg.training, "play_stochastic", False))
+    algorithm_cfg = rl_cfg_dict.get("algorithm", {})
+    bounded_action_mean = bool(
+        algorithm_cfg.get("bounded_action_mean", False)
+        if isinstance(algorithm_cfg, dict)
+        else False
+    )
+    action_bound_limit = float(
+        algorithm_cfg.get("action_bound_limit", 1.0) if isinstance(algorithm_cfg, dict) else 1.0
+    )
+    if action_bound_limit <= 0.0:
+        raise ValueError(f"action_bound_limit must be > 0, got {action_bound_limit}")
+    action_bounds = _action_bounds_for_play(env, action_dim, device)
     print(f"Using stochastic play actions: {play_stochastic}")
+    print(f"Using bounded action mean for play: {bounded_action_mean}")
+
+    def actor_play_action(obs_tensor: torch.Tensor) -> torch.Tensor:
+        if not bounded_action_mean:
+            return actor(
+                TensorDict({"policy": obs_tensor}, batch_size=obs_tensor.shape[0]),
+                stochastic_output=play_stochastic,
+            )
+        mean = actor.mlp(actor.obs_normalizer(obs_tensor))
+        mean = _bounded_action_mean_for_play(mean, action_bounds, action_bound_limit)
+        if not play_stochastic:
+            return mean
+        std = _distribution_std_for_play(actor, mean)
+        action = mean + std * torch.randn_like(mean)
+        if action_bounds is None:
+            return torch.clamp(action, -action_bound_limit, action_bound_limit)
+        low_torch, high_torch = action_bounds
+        return torch.clamp(action, low_torch, high_torch)
 
     # Export actor to ONNX
     if load_path_dir is not None:
@@ -302,14 +376,37 @@ def play_appo(
         import torch.nn as nn
 
         class _DeterministicAPPOActor(nn.Module):
-            def __init__(self, mlp: nn.Module):
+            def __init__(
+                self,
+                actor_model: nn.Module,
+                use_bounded_mean: bool,
+                limit: float,
+                bounds: tuple[torch.Tensor, torch.Tensor] | None,
+            ):
                 super().__init__()
-                self.mlp = mlp
+                self.actor_model = actor_model
+                self.use_bounded_mean = use_bounded_mean
+                self.limit = float(limit)
+                if bounds is None:
+                    self.low = None
+                    self.high = None
+                else:
+                    self.register_buffer("low", bounds[0].reshape(1, -1))
+                    self.register_buffer("high", bounds[1].reshape(1, -1))
 
             def forward(self, obs: torch.Tensor) -> torch.Tensor:
-                return self.mlp(obs)
+                action = self.actor_model.mlp(self.actor_model.obs_normalizer(obs))
+                if not self.use_bounded_mean:
+                    return action
+                if self.low is None or self.high is None:
+                    return self.limit * torch.tanh(action / self.limit)
+                center = 0.5 * (self.low + self.high)
+                half_width = (0.5 * (self.high - self.low)).clamp_min(1e-6)
+                return center + half_width * torch.tanh((action - center) / half_width)
 
-        export_module = _DeterministicAPPOActor(actor.mlp)
+        export_module = _DeterministicAPPOActor(
+            actor, bounded_action_mean, action_bound_limit, action_bounds
+        )
         onnx_path = os.path.join(load_path_dir, "policy.onnx")
         dummy_input = torch.randn(1, obs_dim, device=device)
         with torch.inference_mode():
@@ -355,13 +452,7 @@ def play_appo(
             ),
             step=lambda obs_np: np.asarray(
                 env.step(
-                    actor(
-                        TensorDict(
-                            {"policy": torch.from_numpy(obs_np).to(device)},
-                            batch_size=cfg.training.play_env_num,
-                        ),
-                        stochastic_output=play_stochastic,
-                    )
+                    actor_play_action(torch.from_numpy(obs_np).to(device))
                     .cpu()
                     .numpy()
                     .astype(np.float32)
