@@ -52,6 +52,38 @@ def put_latest_metrics(metrics_queue: Any, msg: dict[str, Any], *, worker_name: 
         print(f"[{worker_name}] metrics enqueue error: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _record_timing_ms(
+    timing_accum_ms: dict[str, float],
+    timing_counts: dict[str, int],
+    key: str,
+    value: float,
+) -> None:
+    timing_accum_ms[key] += float(value)
+    timing_counts[key] += 1
+
+
+def _record_phase_ms(
+    timing_accum_ms: dict[str, float],
+    timing_counts: dict[str, int],
+    key: str,
+    start_ns: int,
+) -> int:
+    end_ns = time.perf_counter_ns()
+    _record_timing_ms(timing_accum_ms, timing_counts, key, (end_ns - start_ns) / 1e6)
+    return end_ns
+
+
+def _average_timing_ms(
+    timing_accum_ms: dict[str, float],
+    timing_counts: dict[str, int],
+) -> dict[str, float]:
+    return {
+        key: value / timing_counts[key]
+        for key, value in timing_accum_ms.items()
+        if timing_counts[key] > 0
+    }
+
+
 def compute_timeout_bootstrap_correction(
     critic: Any,
     collector_device: str,
@@ -231,13 +263,14 @@ def appo_collector_fn(
     ep_timeouts = 0
     ep_terminates = 0
 
-    # Collector timing EMA (milliseconds, α=0.1 → slow-moving average)
-    _EMA = 0.1
-    ema_mlp_infer_ms: float = 0.0
-    ema_env_step_ms: float = 0.0
+    timing_accum_ms: dict[str, float] = defaultdict(float)
+    timing_counts: dict[str, int] = defaultdict(int)
 
     try:
         while not stop_event.is_set():
+            rollout_start_ns = time.perf_counter_ns()
+            phase_start_ns = rollout_start_ns
+
             # Pull latest weights from learner
             if actor_weight_sync.version > local_actor_weight_version:
                 actor_sd = dict(actor.state_dict())
@@ -247,19 +280,34 @@ def appo_collector_fn(
                 critic_sd = dict(critic.state_dict())
                 local_critic_weight_version = critic_weight_sync.read_weights_into(critic_sd)
                 critic.load_state_dict(critic_sd)
+            phase_start_ns = _record_phase_ms(
+                timing_accum_ms,
+                timing_counts,
+                "weight_sync_ms",
+                phase_start_ns,
+            )
 
             # Collect one rollout of length steps_per_env
             write_buf = ring_buffer.write_buffer
+            phase_start_ns = _record_phase_ms(
+                timing_accum_ms,
+                timing_counts,
+                "ring_wait_ms",
+                phase_start_ns,
+            )
             for step in range(steps_per_env):
                 # --- MLP inference (timed) ---
-                t_mlp = time.perf_counter()
+                phase_start_ns = time.perf_counter_ns()
                 with torch.no_grad():
                     obs_torch.copy_(torch.from_numpy(obs_np))
                     actions_torch = actor(obs_td, stochastic_output=True)
                     log_probs_torch = actor.get_output_log_prob(actions_torch)
                     actions_np = actions_torch.cpu().numpy()
-                ema_mlp_infer_ms = (1 - _EMA) * ema_mlp_infer_ms + _EMA * (
-                    (time.perf_counter() - t_mlp) * 1000
+                phase_start_ns = _record_phase_ms(
+                    timing_accum_ms,
+                    timing_counts,
+                    "mlp_infer_ms",
+                    phase_start_ns,
                 )
 
                 write_buf["obs"][:, step, :] = obs_np
@@ -267,12 +315,20 @@ def appo_collector_fn(
                     write_buf["critic"][:, step, :] = critic_np
                 write_buf["actions"][:, step, :] = actions_np
                 write_buf["log_probs"][:, step] = log_probs_torch.cpu().numpy().ravel()
+                phase_start_ns = _record_phase_ms(
+                    timing_accum_ms,
+                    timing_counts,
+                    "ipc_write_ms",
+                    phase_start_ns,
+                )
 
                 # --- Env step (timed) ---
-                t_env = time.perf_counter()
                 state = env.step(actions_np)
-                ema_env_step_ms = (1 - _EMA) * ema_env_step_ms + _EMA * (
-                    (time.perf_counter() - t_env) * 1000
+                phase_start_ns = _record_phase_ms(
+                    timing_accum_ms,
+                    timing_counts,
+                    "env_step_total_ms",
+                    phase_start_ns,
                 )
 
                 next_obs_raw = state.obs
@@ -351,11 +407,6 @@ def appo_collector_fn(
                             msg["terminated_rate"] = ep_terminates / total_ep
                             ep_timeouts = 0
                             ep_terminates = 0
-                        # Collector-side timing breakdown
-                        msg["collector_timing_ms"] = {
-                            "mlp_infer_ms": ema_mlp_infer_ms,
-                            "env_step_total_ms": ema_env_step_ms,
-                        }
                         if ep_reward_components:
                             msg["reward_components"] = {
                                 k: statistics.mean(v) for k, v in ep_reward_components.items() if v
@@ -370,11 +421,45 @@ def appo_collector_fn(
 
                 obs_np = next_actor_obs_np
                 critic_np = next_critic_np
+                phase_start_ns = _record_phase_ms(
+                    timing_accum_ms,
+                    timing_counts,
+                    "postprocess_ms",
+                    phase_start_ns,
+                )
 
+            phase_start_ns = time.perf_counter_ns()
             write_buf["last_obs"][:] = obs_np
             if critic_np is not None:
                 write_buf["last_critic"][:] = critic_np
             ring_buffer.signal_write_done()  # atomic increment, non-blocking
+            phase_start_ns = _record_phase_ms(
+                timing_accum_ms,
+                timing_counts,
+                "rollout_finalize_ms",
+                phase_start_ns,
+            )
+            _record_timing_ms(
+                timing_accum_ms,
+                timing_counts,
+                "rollout_total_ms",
+                (phase_start_ns - rollout_start_ns) / 1e6,
+            )
+            if metrics_queue is not None and timing_counts:
+                put_latest_metrics(
+                    metrics_queue,
+                    {
+                        "worker_index": worker_index,
+                        "worker_name": worker_label,
+                        "collector_timing_ms": _average_timing_ms(
+                            timing_accum_ms,
+                            timing_counts,
+                        ),
+                    },
+                    worker_name=worker_label,
+                )
+                timing_accum_ms.clear()
+                timing_counts.clear()
 
     except Exception:
         stop_event.set()
