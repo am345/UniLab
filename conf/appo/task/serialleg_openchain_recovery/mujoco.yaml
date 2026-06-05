@@ -16,9 +16,9 @@ reward:
   scales:
     tracking_lin_vel: 3.0
     tracking_ang_vel: 1.5
-    upward: 2.0
+    upward: 3.0
     orientation: -1.0
-    upward_progress: 0.0
+    upward_progress: 1.0
     tracking_height: 2.49
     lin_vel_z: -2.0
     ang_vel_xy: -0.05
@@ -32,21 +32,22 @@ reward:
     dof_pos_limits: -5.0
     collision: -2.0
     contact_forces: -1.5e-4
-    upright_wheel_contact: -0.5
-    upright_leg_contact: -2.0
+    upright_wheel_contact: -3.0
+    upright_leg_contact: -5.0
     wheel_contact_without_cmd: 0.2
     diagnostics: 1.0
   tracking_sigma: 0.25
   tracking_lin_vz_weight: 0.0
   upward_progress_delta_scale: 0.05
   upward_progress_max_reward: 2.0
-  tracking_height_sigma: 0.0025
-  tracking_height_use_upright_gate: false
+  tracking_height_sigma: 0.05
+  tracking_height_use_upright_gate: true
+  tracking_height_min_upright_gate: 0.25
   base_height_target: 0.22
   contact_forces_threshold: 35.0
   collision_threshold: 0.1
   upright_contact_force_threshold: 1.0
-  upright_contact_min_gate: 0.0
+  upright_contact_min_gate: 0.5
   upright_contact_soft_cos: 0.8660254037844387
   upright_contact_hard_cos: 0.9659258262890683
   wheel_contact_cmd_threshold: 0.1

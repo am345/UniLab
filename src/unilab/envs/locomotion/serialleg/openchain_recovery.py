@@ -76,6 +76,7 @@ class SerialLegOpenChainRecoveryRewardConfig(SerialLegOpenChainRewardConfig):
     upward_progress_max_reward: float = 2.0
     tracking_height_sigma: float = 0.0025
     tracking_height_use_upright_gate: bool = False
+    tracking_height_min_upright_gate: float = 0.0
     contact_forces_threshold: float = 35.0
     collision_threshold: float = 0.1
     upright_contact_force_threshold: float = 1.0
@@ -535,6 +536,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
     def _reward_tracking_height(self, ctx: RewardContext) -> np.ndarray:
         if self._reward_cfg.tracking_height_use_upright_gate:
             gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+            gate = np.maximum(gate, float(self._reward_cfg.tracking_height_min_upright_gate))
         else:
             gate = np.ones((ctx.num_envs,), dtype=get_global_dtype())
         error = np.square(ctx.base_height - self._reward_cfg.base_height_target)
@@ -702,6 +704,12 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
             return
         log = info.get("log", {})
         gate = self._upright_gate(gravity, gravity.shape[0])
+        if self._reward_cfg.tracking_height_use_upright_gate:
+            height_gate = np.maximum(
+                gate, float(self._reward_cfg.tracking_height_min_upright_gate)
+            )
+        else:
+            height_gate = np.ones((gravity.shape[0],), dtype=get_global_dtype())
         tilt_deg = np.rad2deg(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0)))
         base_contact = np.asarray(
             info.get("base_contact_force", np.zeros((gravity.shape[0],))), dtype=get_global_dtype()
@@ -738,6 +746,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
             {
                 "Recovery/tilt_deg": float(np.mean(tilt_deg)),
                 "Recovery/upright_gate": float(np.mean(gate)),
+                "Recovery/height_gate": float(np.mean(height_gate)),
                 "Recovery/upright_15deg_rate": float(np.mean(tilt_deg < 15.0)),
                 "Recovery/upright_30deg_rate": float(np.mean(tilt_deg < 30.0)),
                 "Recovery/side_region_rate": float(
