@@ -49,8 +49,9 @@ SERIALLEG_WHEEL_INDICES = np.asarray([2, 5], dtype=np.int32)
 NUM_SERIALLEG_ACTIONS = len(SERIALLEG_JOINT_NAMES)
 NUM_SERIALLEG_LEG_ACTIONS = len(SERIALLEG_LEG_INDICES)
 NUM_SERIALLEG_WHEEL_ACTIONS = len(SERIALLEG_WHEEL_INDICES)
-SERIALLEG_OBS_DIM = 27
-SERIALLEG_CRITIC_DIM = 36
+SERIALLEG_OBS_DIM = 32
+SERIALLEG_CRITIC_DIM = 41
+SERIALLEG_COMMAND_SCALE = np.asarray([2.0, 0.25, 5.0, 5.0, 5.0], dtype=np.float64)
 DEFAULT_SERIALLEG_ANGLES = np.asarray(
     [
         -0.275422946189,
@@ -414,11 +415,15 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
             else clipped_actions
         )
 
-        ctrl = np.zeros_like(exec_actions, dtype=self._np_dtype)
-        ctrl[:, 0:2] = exec_actions[:, 0:2] * self._leg_action_scale[0:2] + self.default_angles[0:2]
-        ctrl[:, 3:5] = exec_actions[:, 3:5] * self._leg_action_scale[2:4] + self.default_angles[3:5]
-        ctrl[:, 2] = exec_actions[:, 2] * self._cfg.control_config.wheel_action_scale
-        ctrl[:, 5] = exec_actions[:, 5] * self._cfg.control_config.wheel_action_scale
+        ctrl = np.zeros((exec_actions.shape[0], NUM_SERIALLEG_ACTIONS), dtype=self._np_dtype)
+        ctrl[:, SERIALLEG_LEG_INDICES] = (
+            exec_actions[:, :NUM_SERIALLEG_LEG_ACTIONS] * self._leg_action_scale
+            + self.default_angles[SERIALLEG_LEG_INDICES]
+        )
+        ctrl[:, SERIALLEG_WHEEL_INDICES] = (
+            exec_actions[:, NUM_SERIALLEG_LEG_ACTIONS:]
+            * self._cfg.control_config.wheel_action_scale
+        )
         np.clip(ctrl, self._ctrl_lower, self._ctrl_upper, out=ctrl)
         state.info["current_ctrl"] = ctrl
         return ctrl
@@ -450,35 +455,58 @@ class SerialLegOpenChainFlatEnv(LocomotionBaseEnv):
         dof_vel: np.ndarray,
     ) -> dict[str, np.ndarray]:
         noise_cfg = self._cfg.noise_config
-        dof_diff = dof_pos - self.default_angles
-        noisy_gyro = self._obs_noise(gyro, noise_cfg.scale_gyro)
+        leg_diff = dof_pos[:, SERIALLEG_LEG_INDICES] - self.default_angles[SERIALLEG_LEG_INDICES]
+        leg_vel = dof_vel[:, SERIALLEG_LEG_INDICES]
+        wheel_pos = dof_pos[:, SERIALLEG_WHEEL_INDICES]
+        wheel_vel = dof_vel[:, SERIALLEG_WHEEL_INDICES]
+        noisy_gyro = self._obs_noise(gyro * 0.25, noise_cfg.scale_gyro)
         noisy_gravity = self._obs_noise(gravity, noise_cfg.scale_gravity)
-        noisy_dof_diff = self._obs_noise(dof_diff, noise_cfg.scale_joint_angle)
-        noisy_dof_vel = self._obs_noise(dof_vel, noise_cfg.scale_joint_vel)
+        noisy_leg_diff = self._obs_noise(leg_diff, noise_cfg.scale_joint_angle)
+        noisy_leg_vel = self._obs_noise(leg_vel * 0.25, noise_cfg.scale_joint_vel)
+        wheel_vel_scaled = wheel_vel * 0.05
         num_obs = gyro.shape[0]
-        current_actions = info.get("current_actions", np.zeros((num_obs, self._num_action)))
-        motor_ctrl = info.get("torques", np.zeros((num_obs, self._num_action), dtype=dof_pos.dtype))
+        current_actions = np.asarray(
+            info.get("current_actions", np.zeros((num_obs, self._num_action))),
+            dtype=get_global_dtype(),
+        )
+        motor_ctrl = np.asarray(
+            info.get("torques", np.zeros((num_obs, self._num_action), dtype=dof_pos.dtype)),
+            dtype=get_global_dtype(),
+        )
+        commands = np.asarray(info["commands"], dtype=get_global_dtype())
+        command_obs = np.zeros((num_obs, 5), dtype=get_global_dtype())
+        command_obs[:, 0] = commands[:, 0]
+        command_obs[:, 1] = commands[:, 2]
+        command_obs[:, 4] = self._reward_cfg.base_height_target
+        command_obs *= SERIALLEG_COMMAND_SCALE.astype(get_global_dtype())
+        jump_commands = np.zeros((num_obs, 3), dtype=get_global_dtype())
 
         obs = np.concatenate(
             [
                 noisy_gyro,
                 -noisy_gravity,
-                noisy_dof_diff,
-                noisy_dof_vel,
+                command_obs,
+                noisy_leg_diff,
+                noisy_leg_vel,
+                wheel_pos,
+                wheel_vel_scaled,
                 current_actions,
-                info["commands"],
+                jump_commands,
             ],
             axis=1,
             dtype=get_global_dtype(),
         )
         critic = np.concatenate(
             [
-                gyro,
+                gyro * 0.25,
                 -gravity,
-                dof_diff,
-                dof_vel,
+                command_obs,
+                leg_diff,
+                leg_vel * 0.25,
+                wheel_pos,
+                wheel_vel_scaled,
                 current_actions,
-                info["commands"],
+                jump_commands,
                 linvel,
                 motor_ctrl,
             ],

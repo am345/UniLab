@@ -76,13 +76,6 @@ class SerialLegOpenChainRecoveryRewardConfig(SerialLegOpenChainRewardConfig):
     upward_progress_max_reward: float = 2.0
     tracking_height_sigma: float = 0.0025
     tracking_height_use_upright_gate: bool = False
-    recovery_wheel_gate_start_deg: float = 120.0
-    recovery_wheel_gate_full_deg: float = 45.0
-    recovery_clearance_gate_start_deg: float = 75.0
-    recovery_clearance_gate_full_deg: float = 15.0
-    recovery_success_upright_deg: float = 15.0
-    recovery_success_height_tolerance: float = 0.05
-    recovery_success_bonus: float = 10.0
     contact_forces_threshold: float = 35.0
     collision_threshold: float = 0.1
     upright_contact_force_threshold: float = 1.0
@@ -345,9 +338,6 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
                 "contact_forces": self._reward_contact_forces,
                 "upward_progress": self._reward_upward_progress,
                 "tracking_height": self._reward_tracking_height,
-                "recovery_wheel_contact": self._reward_recovery_wheel_contact,
-                "recovery_nonwheel_clearance": self._reward_recovery_nonwheel_clearance,
-                "recovery_success_bonus": self._reward_recovery_success_bonus,
                 "upright_wheel_contact": self._reward_upright_wheel_contact,
                 "upright_leg_contact": self._reward_upright_leg_contact,
                 "wheel_contact_without_cmd": self._reward_wheel_contact_without_cmd,
@@ -427,21 +417,6 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
 
     def _upright_gate(self, gravity: np.ndarray | None, num_envs: int) -> np.ndarray:
         return rewards.upright_scale(gravity, num_envs)
-
-    def _tilt_gate(
-        self,
-        gravity: np.ndarray | None,
-        num_envs: int,
-        *,
-        start_deg: float,
-        full_deg: float,
-    ) -> np.ndarray:
-        if gravity is None:
-            return np.ones((num_envs,), dtype=get_global_dtype())
-        tilt_deg = np.rad2deg(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0)))
-        denom = max(float(start_deg) - float(full_deg), 1e-6)
-        gate = np.clip((float(start_deg) - tilt_deg) / denom, 0.0, 1.0)
-        return np.asarray(gate, dtype=get_global_dtype())
 
     def _reward_tracking_lin_vel(self, ctx: RewardContext) -> np.ndarray:
         commands = ctx.info["commands"]
@@ -545,78 +520,6 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         error = np.square(ctx.base_height - self._reward_cfg.base_height_target)
         reward = np.exp(-error / float(self._reward_cfg.tracking_height_sigma))
         return np.asarray(reward * gate, dtype=get_global_dtype())
-
-    def _reward_recovery_wheel_contact(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._tilt_gate(
-            ctx.gravity,
-            ctx.num_envs,
-            start_deg=self._reward_cfg.recovery_wheel_gate_start_deg,
-            full_deg=self._reward_cfg.recovery_wheel_gate_full_deg,
-        )
-        wheel_contact = np.asarray(
-            ctx.info.get("wheel_contact_forces", np.zeros((ctx.num_envs, 2))),
-            dtype=get_global_dtype(),
-        )
-        dual_contact = np.all(
-            wheel_contact > self._reward_cfg.upright_contact_force_threshold, axis=1
-        )
-        return np.asarray(dual_contact.astype(get_global_dtype()) * gate, dtype=get_global_dtype())
-
-    def _reward_recovery_nonwheel_clearance(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._tilt_gate(
-            ctx.gravity,
-            ctx.num_envs,
-            start_deg=self._reward_cfg.recovery_clearance_gate_start_deg,
-            full_deg=self._reward_cfg.recovery_clearance_gate_full_deg,
-        )
-        base_contact = np.asarray(
-            ctx.info.get("base_contact_force", np.zeros((ctx.num_envs,))),
-            dtype=get_global_dtype(),
-        )
-        leg_contact = np.asarray(
-            ctx.info.get("leg_contact_forces", np.zeros((ctx.num_envs, 4))),
-            dtype=get_global_dtype(),
-        )
-        clear = (base_contact <= self._reward_cfg.collision_threshold) & ~np.any(
-            leg_contact > self._reward_cfg.upright_contact_force_threshold, axis=1
-        )
-        return np.asarray(clear.astype(get_global_dtype()) * gate, dtype=get_global_dtype())
-
-    def _reward_recovery_success_bonus(self, ctx: RewardContext) -> np.ndarray:
-        assert ctx.gravity is not None
-        tilt_deg = np.rad2deg(np.arccos(np.clip(ctx.gravity[:, 2], -1.0, 1.0)))
-        base_contact = np.asarray(
-            ctx.info.get("base_contact_force", np.zeros((ctx.num_envs,))),
-            dtype=get_global_dtype(),
-        )
-        wheel_contact = np.asarray(
-            ctx.info.get("wheel_contact_forces", np.zeros((ctx.num_envs, 2))),
-            dtype=get_global_dtype(),
-        )
-        leg_contact = np.asarray(
-            ctx.info.get("leg_contact_forces", np.zeros((ctx.num_envs, 4))),
-            dtype=get_global_dtype(),
-        )
-        dual_wheel = np.all(
-            wheel_contact > self._reward_cfg.upright_contact_force_threshold, axis=1
-        )
-        nonwheel_clear = (base_contact <= self._reward_cfg.collision_threshold) & ~np.any(
-            leg_contact > self._reward_cfg.upright_contact_force_threshold, axis=1
-        )
-        height_ok = (
-            np.abs(ctx.base_height - self._reward_cfg.base_height_target)
-            <= self._reward_cfg.recovery_success_height_tolerance
-        )
-        success = (
-            (tilt_deg < self._reward_cfg.recovery_success_upright_deg)
-            & height_ok
-            & dual_wheel
-            & nonwheel_clear
-        )
-        return np.asarray(
-            success.astype(get_global_dtype()) * self._reward_cfg.recovery_success_bonus,
-            dtype=get_global_dtype(),
-        )
 
     def _reward_upright_wheel_contact(self, ctx: RewardContext) -> np.ndarray:
         gate = self._upright_gate(ctx.gravity, ctx.num_envs)
