@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from rsl_rl.utils import resolve_callable
 
+from unilab.algos.torch.appo.learner import clamp_distribution_std
 from unilab.base.final_observation import resolve_terminal_observation_contract
 from unilab.base.observations import split_obs_dict
 from unilab.base.registry import ensure_registries
@@ -257,6 +258,7 @@ def appo_collector_fn(
     actor_sd = dict(actor.state_dict())
     actor_weight_sync.read_weights_into(actor_sd)
     actor.load_state_dict(actor_sd)
+    clamp_distribution_std(actor)
     local_actor_weight_version = actor_weight_sync.version
 
     critic_sd = dict(critic.state_dict())
@@ -309,6 +311,7 @@ def appo_collector_fn(
                 actor_sd = dict(actor.state_dict())
                 local_actor_weight_version = actor_weight_sync.read_weights_into(actor_sd)
                 actor.load_state_dict(actor_sd)
+                clamp_distribution_std(actor)
             if critic_weight_sync.version > local_critic_weight_version:
                 critic_sd = dict(critic.state_dict())
                 local_critic_weight_version = critic_weight_sync.read_weights_into(critic_sd)

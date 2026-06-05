@@ -18,6 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.append(str(ROOT_DIR))
 
+from unilab.algos.torch.appo.learner import clamp_distribution_std
 from unilab.algos.torch.appo.runtime import resolve_appo_runtime
 from unilab.training import (
     BackendAdapter,
@@ -290,6 +291,7 @@ def play_appo(
     print(f"Loading model: {load_path}")
     checkpoint = torch.load(load_path, map_location=device, weights_only=True)
     actor.load_state_dict(checkpoint["actor"])
+    clamp_distribution_std(actor)
     _warn_if_play_commit_mismatch(load_path_dir)
     play_stochastic = bool(getattr(cfg.training, "play_stochastic", False))
     print(f"Using stochastic play actions: {play_stochastic}")

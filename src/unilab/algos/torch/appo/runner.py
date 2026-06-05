@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from rsl_rl.utils import resolve_callable
 
-from unilab.algos.torch.appo.learner import APPOLearner
+from unilab.algos.torch.appo.learner import APPOLearner, clamp_distribution_std
 from unilab.algos.torch.appo.staging import RolloutStagingPool
 from unilab.algos.torch.appo.worker import appo_collector_fn
 from unilab.ipc import AsyncRunner, RolloutRingBuffer, SharedWeightSync
@@ -303,6 +303,7 @@ class APPORunner(AsyncRunner):
         if self.resume_path:
             checkpoint = torch.load(self.resume_path, map_location=self.device, weights_only=True)
             learner.actor.load_state_dict(checkpoint["actor"])
+            clamp_distribution_std(learner.actor)
             learner.critic.load_state_dict(checkpoint["critic"])
             if "optimizer" in checkpoint:
                 learner.optimizer.load_state_dict(checkpoint["optimizer"])

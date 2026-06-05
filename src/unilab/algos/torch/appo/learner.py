@@ -34,6 +34,17 @@ def _distribution_std(distribution: Any, mean: torch.Tensor) -> torch.Tensor:
     return torch.exp(distribution.log_std_param).expand_as(mean)
 
 
+def clamp_distribution_std(module: Any, min_std: float = 1e-4) -> None:
+    distribution = getattr(module, "distribution", None)
+    if distribution is None or getattr(distribution, "std_type", None) != "scalar":
+        return
+    std_param = getattr(distribution, "std_param", None)
+    if std_param is None:
+        return
+    with torch.no_grad():
+        std_param.clamp_(min=min_std)
+
+
 def _sample_tensor_for_metric(tensor: torch.Tensor, max_items: int = 8192) -> torch.Tensor:
     """Return a deterministic bounded sample for scalar metrics."""
     flat = tensor.detach().reshape(-1)
@@ -181,9 +192,11 @@ class APPOLearner:
         self._device_type = torch.device(device).type
         self.actor = actor.to(self.device)
         self.critic = critic.to(self.device)
+        clamp_distribution_std(self.actor)
 
         # Target actor for V-trace IS computation
         self.target_actor = copy.deepcopy(self.actor).to(self.device)
+        clamp_distribution_std(self.target_actor)
         self.target_actor.eval()
         for p in self.target_actor.parameters():
             p.requires_grad = False
@@ -578,6 +591,7 @@ class APPOLearner:
                 global_grad_norm = _grad_norm(self._combined_params)
                 nn.utils.clip_grad_norm_(self._combined_params, self.max_grad_norm)
                 self.optimizer.step()
+                clamp_distribution_std(self.actor)
 
                 with torch.inference_mode():
                     clip_fraction = (torch.abs(ratio - 1.0) > self.clip_param).float().mean().item()
