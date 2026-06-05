@@ -207,6 +207,24 @@ def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
     assert env.get_dof_vel() is dof_vel
 
 
+def test_serialleg_contact_rewards_use_precomputed_contact_arrays() -> None:
+    env = _serialleg_env_stub()
+    env._reward_cfg = env._cfg.reward_config
+    env._backend = SimpleNamespace(
+        get_sensor_data=lambda name: pytest.fail(f"unexpected sensor read: {name}")
+    )
+    data = {
+        "projected_gravity": np.array([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]], dtype=np.float32),
+        "base_contact_force": np.array([0.2, 0.0], dtype=np.float32),
+        "leg_contact_forces": np.array(
+            [[0.0, 2.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32
+        ),
+    }
+
+    np.testing.assert_allclose(env._reward_collision(data), [1.0, 0.0])
+    np.testing.assert_allclose(env._reward_upright_leg_contact(data), [1.0, 0.0])
+
+
 def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
     class FakePool:
         def __init__(self, sensor_data: np.ndarray) -> None:

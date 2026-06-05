@@ -433,6 +433,10 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._policy_leg_acc = np.zeros_like(self._policy_leg_vel)
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._bad_orientation_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._zero_base_contact_force = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._zero_leg_contact_forces = np.zeros(
+            (num_envs, NUM_POLICY_LEG_ACTIONS), dtype=self._np_dtype
+        )
         self._init_action_delay_buffers(num_envs)
         self._next_push_step = self._sample_push_interval_steps()
 
@@ -936,7 +940,17 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         base_pos, base_linvel, base_angvel, projected_gravity = self.base_state()
         dof_pos = self.get_dof_pos()
         dof_vel = self.get_dof_vel()
+        base_contact_force = (
+            self._sensor_scalar("base_contact")
+            if self._reward_scale_enabled("collision")
+            else self._zero_base_contact_force
+        )
         wheel_contact_forces = self._wheel_contact_forces()
+        leg_contact_forces = (
+            self._leg_contact_forces()
+            if self._reward_scale_enabled("upright_leg_contact")
+            else self._zero_leg_contact_forces
+        )
         output_leg_pos = dof_pos[:, OUTPUT_LEG_INDICES]
         output_leg_vel = dof_vel[:, OUTPUT_LEG_INDICES]
         policy_leg_pos, policy_leg_vel = output_to_policy_pos_vel_np(output_leg_pos, output_leg_vel)
@@ -951,7 +965,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         state.info["policy_leg_torque"] = self._policy_leg_torque.copy()
         state.info["policy_leg_vel"] = self._policy_leg_vel.copy()
         state.info["policy_leg_acc"] = self._policy_leg_acc.copy()
+        state.info["base_contact_force"] = base_contact_force
         state.info["wheel_contact_forces"] = wheel_contact_forces
+        state.info["leg_contact_forces"] = leg_contact_forces
         terminated = self._compute_terminated(
             base_pos,
             base_linvel,
@@ -970,7 +986,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             projected_gravity,
             dof_pos,
             dof_vel,
+            base_contact_force,
             wheel_contact_forces,
+            leg_contact_forces,
             policy_leg_pos,
             policy_leg_vel,
         )
@@ -1121,6 +1139,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             "is_alive": self._reward_is_alive,
         }
 
+    def _reward_scale_enabled(self, name: str) -> bool:
+        return float(self._reward_cfg.scales.get(name, 0.0)) != 0.0
+
     def _compute_reward(
         self,
         info: dict[str, Any],
@@ -1130,7 +1151,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         projected_gravity: np.ndarray,
         dof_pos: np.ndarray,
         dof_vel: np.ndarray,
+        base_contact_force: np.ndarray,
         wheel_contact_forces: np.ndarray,
+        leg_contact_forces: np.ndarray,
         policy_leg_pos: np.ndarray,
         policy_leg_vel: np.ndarray,
     ) -> np.ndarray:
@@ -1142,7 +1165,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             "projected_gravity": projected_gravity,
             "dof_pos": dof_pos,
             "dof_vel": dof_vel,
+            "base_contact_force": base_contact_force,
             "wheel_contact_forces": wheel_contact_forces,
+            "leg_contact_forces": leg_contact_forces,
             "policy_leg_pos": policy_leg_pos,
             "policy_leg_vel": policy_leg_vel,
         }
@@ -1382,7 +1407,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         return np.asarray(penalty, dtype=get_global_dtype())
 
     def _reward_collision(self, data: dict[str, Any]) -> np.ndarray:
-        base_contact = self._sensor_scalar("base_contact")
+        base_contact = data["base_contact_force"]
         gate = self._upright_factor(data["projected_gravity"])
         return np.asarray(
             (base_contact > self._reward_cfg.collision_threshold).astype(get_global_dtype()) * gate,
@@ -1410,7 +1435,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
     def _reward_upright_leg_contact(self, data: dict[str, Any]) -> np.ndarray:
         gate = self._upright_factor(data["projected_gravity"])
         active = gate >= self._reward_cfg.upright_contact_min_gate
-        leg_contact = self._leg_contact_forces()
+        leg_contact = data["leg_contact_forces"]
         has_contact = np.any(leg_contact > self._reward_cfg.upright_contact_force_threshold, axis=1)
         return np.asarray(
             has_contact.astype(get_global_dtype()) * gate * active.astype(get_global_dtype()),
