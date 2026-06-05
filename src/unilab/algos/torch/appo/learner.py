@@ -34,7 +34,7 @@ def _distribution_std(distribution: Any, mean: torch.Tensor) -> torch.Tensor:
     return torch.exp(distribution.log_std_param).expand_as(mean)
 
 
-def clamp_distribution_std(module: Any, min_std: float = 1e-4) -> None:
+def clamp_distribution_std(module: Any, min_std: float = 1e-4, max_std: float = 10.0) -> None:
     distribution = getattr(module, "distribution", None)
     if distribution is None or getattr(distribution, "std_type", None) != "scalar":
         return
@@ -42,7 +42,8 @@ def clamp_distribution_std(module: Any, min_std: float = 1e-4) -> None:
     if std_param is None:
         return
     with torch.no_grad():
-        std_param.clamp_(min=min_std)
+        std_param.nan_to_num_(nan=min_std, posinf=max_std, neginf=min_std)
+        std_param.clamp_(min=min_std, max=max_std)
 
 
 def _sample_tensor_for_metric(tensor: torch.Tensor, max_items: int = 8192) -> torch.Tensor:
@@ -255,8 +256,11 @@ class APPOLearner:
         )
 
     def _actor_mean_std(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        distribution: Any = self.actor.distribution
-        mean = self.actor.mlp(self.actor.obs_normalizer(obs))
+        return self._model_mean_std(self.actor, obs)
+
+    def _model_mean_std(self, model: Any, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        distribution: Any = model.distribution
+        mean = model.mlp(model.obs_normalizer(obs))
         return mean, _distribution_std(distribution, mean)
 
     def _critic_value(self, obs: torch.Tensor) -> torch.Tensor:
@@ -451,10 +455,10 @@ class APPOLearner:
         actions_flat = actions.flatten(0, 1)  # [T*N, A]
         with torch.inference_mode():
             clamp_distribution_std(self.target_actor)
-            self.target_actor(obs_td, stochastic_output=True)
-            target_log_probs_flat = self.target_actor.get_output_log_prob(actions_flat)
-            batch_dict["_old_mu"] = self.target_actor.output_mean.clone()
-            batch_dict["_old_sigma"] = self.target_actor.output_std.clone()
+            target_mu, target_sigma = self._model_mean_std(self.target_actor, obs_flat)
+            target_log_probs_flat = self._gaussian_log_prob(actions_flat, target_mu, target_sigma)
+            batch_dict["_old_mu"] = target_mu.clone()
+            batch_dict["_old_sigma"] = target_sigma.clone()
         target_log_probs = target_log_probs_flat.view(T, N)
         with torch.inference_mode():
             rhos = torch.exp(target_log_probs - behavior_log_probs)
