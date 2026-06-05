@@ -337,12 +337,22 @@ def appo_collector_fn(
                 with torch.no_grad():
                     obs_torch.copy_(torch.from_numpy(obs_np))
                     raw_actions_torch = actor(obs_td, stochastic_output=True)
+                    raw_actions_torch = torch.where(
+                        torch.isfinite(raw_actions_torch),
+                        raw_actions_torch,
+                        torch.zeros_like(raw_actions_torch),
+                    )
                     if action_bounds is None:
                         actions_torch = raw_actions_torch
                     else:
                         low_torch, high_torch = action_bounds
                         actions_torch = torch.clamp(raw_actions_torch, low_torch, high_torch)
                     log_probs_torch = actor.get_output_log_prob(actions_torch)
+                    log_probs_torch = torch.where(
+                        torch.isfinite(log_probs_torch),
+                        log_probs_torch,
+                        torch.zeros_like(log_probs_torch),
+                    )
                     raw_actions_np = raw_actions_torch.cpu().numpy()
                     actions_np = actions_torch.cpu().numpy()
                 phase_start_ns = _record_phase_ms(

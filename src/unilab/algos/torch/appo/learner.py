@@ -34,7 +34,7 @@ def _distribution_std(distribution: Any, mean: torch.Tensor) -> torch.Tensor:
     return torch.exp(distribution.log_std_param).expand_as(mean)
 
 
-def clamp_distribution_std(module: Any, min_std: float = 1e-4, max_std: float = 10.0) -> None:
+def clamp_distribution_std(module: Any, min_std: float = 0.05, max_std: float = 2.0) -> None:
     distribution = getattr(module, "distribution", None)
     if distribution is None or getattr(distribution, "std_type", None) != "scalar":
         return
@@ -61,6 +61,14 @@ def _grad_norm(parameters) -> float:
     if not norms:
         return 0.0
     return float(torch.norm(torch.stack(norms), 2).item())
+
+
+def _gradients_are_finite(parameters: Iterable[torch.nn.Parameter]) -> bool:
+    for param in parameters:
+        grad = getattr(param, "grad", None)
+        if grad is not None and not torch.isfinite(grad).all():
+            return False
+    return True
 
 
 def _unique_parameters(parameters: Iterable[torch.nn.Parameter]) -> list[torch.nn.Parameter]:
@@ -541,6 +549,7 @@ class APPOLearner:
         mean_target_to_current_kl = 0.0
         mean_global_grad_norm = 0.0
         num_updates = 0
+        skipped_nonfinite_updates = 0
 
         for epoch in range(self.num_learning_epochs):
             indices = torch.randperm(batch_size, device=self.device)
@@ -583,6 +592,10 @@ class APPOLearner:
                 )
 
                 kl_mean_value: float | None = None
+                if not torch.isfinite(loss) or not torch.isfinite(kl_mean):
+                    skipped_nonfinite_updates += 1
+                    continue
+
                 if self.desired_kl is not None and self.schedule == "adaptive":
                     with torch.inference_mode():
                         kl_mean_value = float(kl_mean.item())
@@ -594,6 +607,10 @@ class APPOLearner:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if not _gradients_are_finite(self._combined_params):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    skipped_nonfinite_updates += 1
+                    continue
                 global_grad_norm = _grad_norm(self._combined_params)
                 nn.utils.clip_grad_norm_(self._combined_params, self.max_grad_norm)
                 self.optimizer.step()
@@ -636,6 +653,7 @@ class APPOLearner:
             "optim/learning_rate": final_lr,
             "policy_kl/behavior_to_current_kl": mean_behavior_to_current_kl / num_updates,
             "appo/updates_executed": float(num_updates),
+            "appo/updates_skipped_nonfinite": float(skipped_nonfinite_updates),
         }
         metrics.update(batch_dict.get("_appo_process_metrics", {}))
         self.last_update_metrics = metrics
