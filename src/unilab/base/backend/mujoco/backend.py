@@ -822,11 +822,11 @@ class MuJoCoBackend(SimBackend):
         )
         if control_spec & int(mujoco.mjtState.mjSTATE_XFRC_APPLIED):
             self._pending_xfrc_applied.fill(0.0)
-        self._physics_state[:] = state_np.astype(self._np_dtype)
+        self._physics_state[:] = state_np.astype(self._np_dtype, copy=False)
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
-        self._sensor_data[:] = sensor_np.astype(self._np_dtype)
+        self._sensor_data[:] = sensor_np.astype(self._np_dtype, copy=False)
         refresh_cache_ms = (time.perf_counter() - t0) * 1000.0
 
         return {
@@ -865,11 +865,11 @@ class MuJoCoBackend(SimBackend):
                 return_sensor=True,
                 post_step_forward_sensor=self._post_step_forward_sensor,
             )
-            self._physics_state[:] = state_np.astype(self._np_dtype)
+            self._physics_state[:] = state_np.astype(self._np_dtype, copy=False)
             physics_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
-            self._sensor_data[:] = sensor_np.astype(self._np_dtype)
+            self._sensor_data[:] = sensor_np.astype(self._np_dtype, copy=False)
             refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
 
         if has_pending_xfrc:
@@ -904,8 +904,8 @@ class MuJoCoBackend(SimBackend):
             randomization=self._translate_reset_randomization(randomization, num_reset),
         )
 
-        self._physics_state[env_indices] = state_out.astype(self._np_dtype)
-        self._sensor_data[env_indices] = sensor_np.astype(self._np_dtype)
+        self._physics_state[env_indices] = state_out.astype(self._np_dtype, copy=False)
+        self._sensor_data[env_indices] = sensor_np.astype(self._np_dtype, copy=False)
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities(
