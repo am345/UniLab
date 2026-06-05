@@ -80,6 +80,8 @@ class SerialLegOpenChainRecoveryRewardConfig(SerialLegOpenChainRewardConfig):
     collision_threshold: float = 0.1
     upright_contact_force_threshold: float = 1.0
     upright_contact_min_gate: float = 0.0
+    upright_contact_soft_cos: float = 0.8660254037844387
+    upright_contact_hard_cos: float = 0.9659258262890683
     wheel_contact_cmd_threshold: float = 0.1
     action_saturation_threshold: float = 0.95
     active_rod_margin_warning: float = 0.05
@@ -418,6 +420,16 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
     def _upright_gate(self, gravity: np.ndarray | None, num_envs: int) -> np.ndarray:
         return rewards.upright_scale(gravity, num_envs)
 
+    def _upright_contact_gate(self, gravity: np.ndarray | None, num_envs: int) -> np.ndarray:
+        if gravity is None:
+            return np.ones((num_envs,), dtype=get_global_dtype())
+        soft = float(self._reward_cfg.upright_contact_soft_cos)
+        hard = float(self._reward_cfg.upright_contact_hard_cos)
+        if hard <= soft:
+            return np.asarray((gravity[:, 2] >= hard).astype(get_global_dtype()))
+        gate = np.clip((gravity[:, 2] - soft) / (hard - soft), 0.0, 1.0)
+        return np.asarray(gate, dtype=get_global_dtype())
+
     def _reward_tracking_lin_vel(self, ctx: RewardContext) -> np.ndarray:
         commands = ctx.info["commands"]
         gate = self._upright_gate(ctx.gravity, ctx.num_envs)
@@ -522,7 +534,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         return np.asarray(reward * gate, dtype=get_global_dtype())
 
     def _reward_upright_wheel_contact(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        gate = self._upright_contact_gate(ctx.gravity, ctx.num_envs)
         active = gate >= self._reward_cfg.upright_contact_min_gate
         wheel_contact = np.asarray(
             ctx.info.get("wheel_contact_forces", np.zeros((ctx.num_envs, 2))),
@@ -536,7 +548,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         )
 
     def _reward_upright_leg_contact(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        gate = self._upright_contact_gate(ctx.gravity, ctx.num_envs)
         active = gate >= self._reward_cfg.upright_contact_min_gate
         leg_contact = np.asarray(
             ctx.info.get("leg_contact_forces", np.zeros((ctx.num_envs, 4))),
@@ -549,7 +561,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
         )
 
     def _reward_wheel_contact_without_cmd(self, ctx: RewardContext) -> np.ndarray:
-        gate = self._upright_gate(ctx.gravity, ctx.num_envs)
+        gate = self._upright_contact_gate(ctx.gravity, ctx.num_envs)
         commands = ctx.info["commands"]
         stationary = (
             np.linalg.norm(commands[:, :2], axis=1) < self._reward_cfg.wheel_contact_cmd_threshold
