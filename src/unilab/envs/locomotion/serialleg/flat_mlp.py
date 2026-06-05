@@ -454,6 +454,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._zero_leg_contact_forces = np.zeros(
             (num_envs, NUM_POLICY_LEG_ACTIONS), dtype=self._np_dtype
         )
+        self._actor_obs_buf = np.zeros((num_envs, ACTOR_OBS_DIM), dtype=self._np_dtype)
+        self._critic_obs_buf = np.zeros((num_envs, CRITIC_OBS_DIM), dtype=self._np_dtype)
         self._init_action_delay_buffers(num_envs)
         self._next_push_step = self._sample_push_interval_steps()
 
@@ -1082,49 +1084,83 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         wheel_pos = dof_pos[:, WHEEL_INDICES]
         wheel_vel = dof_vel[:, WHEEL_INDICES]
         commands = np.asarray(info["commands"], dtype=get_global_dtype())
-        current_actions = np.asarray(
-            info.get("current_actions", np.zeros((num_obs, NUM_ACTIONS))),
-            dtype=get_global_dtype(),
-        )
-        wheel_contact_forces = np.asarray(
-            info.get("wheel_contact_forces", np.zeros((num_obs, NUM_WHEEL_ACTIONS))),
-            dtype=get_global_dtype(),
-        )
-        noise_cfg = self._cfg.noise_config
-        actor = np.concatenate(
-            [
-                self._obs_noise(base_angvel * 0.25, noise_cfg.scale_gyro),
-                self._obs_noise(projected_gravity, noise_cfg.scale_gravity),
-                commands * COMMAND_SCALE,
-                self._obs_noise(leg_pos_rel, noise_cfg.scale_joint_angle),
-                self._obs_noise(policy_leg_vel * 0.25, noise_cfg.scale_joint_vel),
-                wheel_pos,
-                wheel_vel * 0.05,
-                current_actions,
-                np.zeros((num_obs, 3), dtype=get_global_dtype()),
-            ],
-            axis=1,
-            dtype=get_global_dtype(),
-        )
-        critic = np.concatenate(
-            [
-                base_angvel * 0.25,
-                projected_gravity,
-                commands * COMMAND_SCALE,
-                leg_pos_rel,
-                policy_leg_vel * 0.25,
-                wheel_pos,
-                wheel_vel * 0.05,
-                current_actions,
-                np.zeros((num_obs, 3), dtype=get_global_dtype()),
-                base_linvel,
-                wheel_contact_forces,
-                base_pos[:, 2:3],
-            ],
-            axis=1,
-            dtype=get_global_dtype(),
+        current_actions = info.get("current_actions")
+        if current_actions is None:
+            current_actions = np.zeros((num_obs, NUM_ACTIONS), dtype=get_global_dtype())
+        else:
+            current_actions = np.asarray(current_actions, dtype=get_global_dtype())
+        wheel_contact_forces = info.get("wheel_contact_forces")
+        if wheel_contact_forces is None:
+            wheel_contact_forces = np.zeros((num_obs, NUM_WHEEL_ACTIONS), dtype=get_global_dtype())
+        else:
+            wheel_contact_forces = np.asarray(wheel_contact_forces, dtype=get_global_dtype())
+        actor, critic = self._obs_output_arrays(num_obs, env_ids)
+        self._fill_obs_arrays(
+            actor,
+            critic,
+            base_pos,
+            base_linvel,
+            base_angvel,
+            projected_gravity,
+            leg_pos_rel,
+            policy_leg_vel,
+            wheel_pos,
+            wheel_vel,
+            commands,
+            current_actions,
+            wheel_contact_forces,
         )
         return {"obs": actor, "critic": critic}
+
+    def _obs_output_arrays(
+        self, num_obs: int, env_ids: np.ndarray | None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if env_ids is None and num_obs == self._num_envs:
+            return self._actor_obs_buf, self._critic_obs_buf
+        return (
+            np.empty((num_obs, ACTOR_OBS_DIM), dtype=get_global_dtype()),
+            np.empty((num_obs, CRITIC_OBS_DIM), dtype=get_global_dtype()),
+        )
+
+    def _fill_obs_arrays(
+        self,
+        actor: np.ndarray,
+        critic: np.ndarray,
+        base_pos: np.ndarray,
+        base_linvel: np.ndarray,
+        base_angvel: np.ndarray,
+        projected_gravity: np.ndarray,
+        leg_pos_rel: np.ndarray,
+        policy_leg_vel: np.ndarray,
+        wheel_pos: np.ndarray,
+        wheel_vel: np.ndarray,
+        commands: np.ndarray,
+        current_actions: np.ndarray,
+        wheel_contact_forces: np.ndarray,
+    ) -> None:
+        noise_cfg = self._cfg.noise_config
+        actor[:, 0:3] = self._obs_noise(base_angvel * 0.25, noise_cfg.scale_gyro)
+        actor[:, 3:6] = self._obs_noise(projected_gravity, noise_cfg.scale_gravity)
+        np.multiply(commands, COMMAND_SCALE, out=actor[:, 6:11])
+        actor[:, 11:15] = self._obs_noise(leg_pos_rel, noise_cfg.scale_joint_angle)
+        actor[:, 15:19] = self._obs_noise(policy_leg_vel * 0.25, noise_cfg.scale_joint_vel)
+        actor[:, 19:21] = wheel_pos
+        np.multiply(wheel_vel, 0.05, out=actor[:, 21:23])
+        actor[:, 23:29] = current_actions
+        actor[:, 29:32] = 0.0
+
+        np.multiply(base_angvel, 0.25, out=critic[:, 0:3])
+        critic[:, 3:6] = projected_gravity
+        critic[:, 6:11] = actor[:, 6:11]
+        critic[:, 11:15] = leg_pos_rel
+        np.multiply(policy_leg_vel, 0.25, out=critic[:, 15:19])
+        critic[:, 19:21] = wheel_pos
+        critic[:, 21:23] = actor[:, 21:23]
+        critic[:, 23:29] = current_actions
+        critic[:, 29:32] = 0.0
+        critic[:, 32:35] = base_linvel
+        critic[:, 35:37] = wheel_contact_forces
+        critic[:, 37:38] = base_pos[:, 2:3]
 
     def _update_commands(self, info: dict[str, Any]) -> None:
         commands = info.get("commands")

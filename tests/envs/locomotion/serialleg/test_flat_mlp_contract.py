@@ -67,6 +67,8 @@ def _serialleg_env_stub(num_envs: int = 2) -> Any:
     env._num_envs = num_envs
     env._np_dtype = np.float32
     env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (num_envs, 4)).copy()
+    env._actor_obs_buf = np.zeros((num_envs, ACTOR_OBS_DIM), dtype=np.float32)
+    env._critic_obs_buf = np.zeros((num_envs, CRITIC_OBS_DIM), dtype=np.float32)
     return env
 
 
@@ -184,6 +186,8 @@ def test_serialleg_obs_contract_uses_se3_actor_and_critic_layout() -> None:
         info, base_pos, base_linvel, base_angvel, projected_gravity, dof_pos, dof_vel
     )
 
+    assert obs["obs"] is env._actor_obs_buf
+    assert obs["critic"] is env._critic_obs_buf
     assert set(obs) == {"obs", "critic"}
     assert obs["obs"].shape == (2, ACTOR_OBS_DIM)
     assert obs["critic"].shape == (2, CRITIC_OBS_DIM)
@@ -194,6 +198,38 @@ def test_serialleg_obs_contract_uses_se3_actor_and_critic_layout() -> None:
     np.testing.assert_allclose(obs["critic"][:, 35:37], info["wheel_contact_forces"])
     np.testing.assert_allclose(obs["critic"][:, 37:38], base_pos[:, 2:3])
     assert env.obs_groups_spec == {"obs": ACTOR_OBS_DIM, "critic": CRITIC_OBS_DIM}
+
+
+def test_serialleg_reset_obs_path_does_not_alias_full_obs_buffers() -> None:
+    env = _serialleg_env_stub()
+    base_pos = np.array([[0.0, 0.0, DEFAULT_BASE_HEIGHT]], dtype=np.float32)
+    base_linvel = np.zeros((1, 3), dtype=np.float32)
+    base_angvel = np.zeros((1, 3), dtype=np.float32)
+    projected_gravity = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
+    dof_pos = np.zeros((1, NUM_ACTIONS), dtype=np.float32)
+    dof_vel = np.zeros((1, NUM_ACTIONS), dtype=np.float32)
+    dof_pos[:, OUTPUT_LEG_INDICES] = DEFAULT_OUTPUT_LEG_POS.astype(np.float32)
+    info = {
+        "commands": np.zeros((1, 5), dtype=np.float32),
+        "current_actions": np.zeros((1, NUM_ACTIONS), dtype=np.float32),
+        "wheel_contact_forces": np.zeros((1, 2), dtype=np.float32),
+    }
+
+    obs = env.compute_obs_from_arrays(
+        info,
+        base_pos,
+        base_linvel,
+        base_angvel,
+        projected_gravity,
+        dof_pos,
+        dof_vel,
+        env_ids=np.array([1], dtype=np.int32),
+    )
+
+    assert obs["obs"] is not env._actor_obs_buf
+    assert obs["critic"] is not env._critic_obs_buf
+    assert obs["obs"].shape == (1, ACTOR_OBS_DIM)
+    assert obs["critic"].shape == (1, CRITIC_OBS_DIM)
 
 
 def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
