@@ -72,6 +72,7 @@ training:
   play_only: false
   no_play: false
   play_render_mode: auto
+  play_stochastic: false
   play_env_num: 16
   play_steps: 150
   cam_distance: 6.0

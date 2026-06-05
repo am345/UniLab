@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -96,6 +98,7 @@ def run_motrix_play_loop(
     device: str,
     play_env_num: int,
     num_steps: int | None = None,
+    stochastic_output: bool = False,
 ) -> None:
     import numpy as np
     from tensordict import TensorDict
@@ -115,7 +118,8 @@ def run_motrix_play_loop(
                     actor(
                         TensorDict(
                             {"policy": torch.from_numpy(obs_np).to(device)}, batch_size=play_env_num
-                        )
+                        ),
+                        stochastic_output=stochastic_output,
                     )
                     .cpu()
                     .numpy()
@@ -145,6 +149,43 @@ def resolve_appo_checkpoint_path(
 
 def _get_log_root(cfg: DictConfig) -> str:
     return str(get_log_root(ROOT_DIR, cfg))
+
+
+def _current_git_commit() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT_DIR,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _warn_if_play_commit_mismatch(load_path_dir: str | None) -> None:
+    if load_path_dir is None:
+        return
+    run_config_path = Path(load_path_dir) / "run_config.json"
+    if not run_config_path.is_file():
+        return
+    try:
+        run_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"WARNING: Could not read run_config.json for play provenance: {exc}")
+        return
+    run_commit = (
+        run_config.get("run", {}).get("git", {}).get("commit")
+        if isinstance(run_config, dict)
+        else None
+    )
+    current_commit = _current_git_commit()
+    if run_commit and current_commit and run_commit != current_commit:
+        print(
+            "WARNING: Play checkpoint was trained with a different git commit: "
+            f"run_config={run_commit[:12]}, current={current_commit[:12]}. "
+            "Use the original commit or regenerate the checkpoint before judging policy behavior."
+        )
 
 
 def play_appo(
@@ -249,6 +290,9 @@ def play_appo(
     print(f"Loading model: {load_path}")
     checkpoint = torch.load(load_path, map_location=device, weights_only=True)
     actor.load_state_dict(checkpoint["actor"])
+    _warn_if_play_commit_mismatch(load_path_dir)
+    play_stochastic = bool(getattr(cfg.training, "play_stochastic", False))
+    print(f"Using stochastic play actions: {play_stochastic}")
 
     # Export actor to ONNX
     if load_path_dir is not None:
@@ -313,7 +357,8 @@ def play_appo(
                         TensorDict(
                             {"policy": torch.from_numpy(obs_np).to(device)},
                             batch_size=cfg.training.play_env_num,
-                        )
+                        ),
+                        stochastic_output=play_stochastic,
                     )
                     .cpu()
                     .numpy()
