@@ -207,6 +207,7 @@ class APPOLearner:
         vtrace_clip_c: float = 1.0,
         action_bound_loss_coef: float = 0.0,
         action_bound_limit: float = 1.0,
+        bounded_action_mean: bool = False,
         enable_compile: bool = False,
         **kwargs,
     ):
@@ -253,6 +254,9 @@ class APPOLearner:
         self.vtrace_clip_c = vtrace_clip_c
         self.action_bound_loss_coef = float(action_bound_loss_coef)
         self.action_bound_limit = float(action_bound_limit)
+        if self.action_bound_limit <= 0.0:
+            raise ValueError(f"action_bound_limit must be > 0, got {self.action_bound_limit}")
+        self.bounded_action_mean = bool(bounded_action_mean)
         self._update_counter = 0
         self.last_update_metrics: dict[str, float] = {}
         self.enable_compile = (
@@ -284,6 +288,8 @@ class APPOLearner:
     def _model_mean_std(self, model: Any, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         distribution: Any = model.distribution
         mean = model.mlp(model.obs_normalizer(obs))
+        if self.bounded_action_mean:
+            mean = self.action_bound_limit * torch.tanh(mean / self.action_bound_limit)
         return mean, _distribution_std(distribution, mean)
 
     def _critic_value(self, obs: torch.Tensor) -> torch.Tensor:

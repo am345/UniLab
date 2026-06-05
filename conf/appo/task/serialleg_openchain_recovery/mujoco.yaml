@@ -9,8 +9,9 @@ algo:
   steps_per_env: 16
   max_iterations: 1500
   algorithm:
-    action_bound_loss_coef: 0.05
+    action_bound_loss_coef: 0.0
     action_bound_limit: 1.0
+    bounded_action_mean: true
 reward:
   scales:
     tracking_lin_vel: 3.0

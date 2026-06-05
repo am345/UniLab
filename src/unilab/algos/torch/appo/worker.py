@@ -5,6 +5,7 @@ Collects rollout payloads and writes them to RolloutRingBuffer.
 
 from __future__ import annotations
 
+import math
 import statistics
 import sys
 import time
@@ -21,6 +22,8 @@ from unilab.base.final_observation import resolve_terminal_observation_contract
 from unilab.base.observations import split_obs_dict
 from unilab.base.registry import ensure_registries
 from unilab.training.seed import apply_training_seed
+
+_LOG_2_PI = math.log(2.0 * math.pi)
 
 
 def put_latest_metrics(metrics_queue: Any, msg: dict[str, Any], *, worker_name: str) -> None:
@@ -101,6 +104,40 @@ def _action_bounds_tensors(env: Any, action_dim: int, device: str) -> tuple[Any,
     if not (np.all(np.isfinite(low_np)) and np.all(np.isfinite(high_np))):
         return None
     return torch.from_numpy(low_np).to(device), torch.from_numpy(high_np).to(device)
+
+
+def _distribution_std(distribution: Any, mean: torch.Tensor) -> torch.Tensor:
+    if distribution.std_type == "scalar":
+        return distribution.std_param.expand_as(mean)
+    return torch.exp(distribution.log_std_param).expand_as(mean)
+
+
+def _actor_mean_std(actor: Any, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    distribution: Any = actor.distribution
+    mean = actor.mlp(actor.obs_normalizer(obs))
+    std = _distribution_std(distribution, mean)
+    std = torch.nan_to_num(std, nan=0.05, posinf=2.0, neginf=0.05).clamp(min=0.05, max=2.0)
+    return mean, std
+
+
+def _bounded_mean(
+    mean: torch.Tensor,
+    action_bounds: tuple[torch.Tensor, torch.Tensor] | None,
+    action_bound_limit: float,
+) -> torch.Tensor:
+    if action_bounds is None:
+        return float(action_bound_limit) * torch.tanh(mean / float(action_bound_limit))
+    low_torch, high_torch = action_bounds
+    center = 0.5 * (low_torch + high_torch)
+    half_width = (0.5 * (high_torch - low_torch)).clamp_min(1e-6)
+    return center + half_width * torch.tanh((mean - center) / half_width)
+
+
+def _gaussian_log_prob(
+    actions: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> torch.Tensor:
+    normalized = (actions - mean) / std
+    return (-0.5 * (normalized.pow(2) + 2.0 * torch.log(std) + _LOG_2_PI)).sum(dim=-1)
 
 
 def _record_env_timing_ms(
@@ -219,6 +256,11 @@ def appo_collector_fn(
 
     # Build actor (stochastic MLPModel — mirrors runner._build_learner)
     cfg = dict(rl_cfg)
+    algo_cfg = cfg.get("algorithm", cfg)
+    bounded_action_mean = bool(algo_cfg.get("bounded_action_mean", False))
+    action_bound_limit = float(algo_cfg.get("action_bound_limit", 1.0))
+    if action_bound_limit <= 0.0:
+        raise ValueError(f"action_bound_limit must be > 0, got {action_bound_limit}")
 
     obs_example = torch.zeros((num_envs, obs_dim), device=collector_device)
     td_example = TensorDict({"policy": obs_example}, batch_size=num_envs)
@@ -336,7 +378,12 @@ def appo_collector_fn(
                 phase_start_ns = time.perf_counter_ns()
                 with torch.no_grad():
                     obs_torch.copy_(torch.from_numpy(obs_np))
-                    raw_actions_torch = actor(obs_td, stochastic_output=True)
+                    if bounded_action_mean:
+                        action_mean, action_std = _actor_mean_std(actor, obs_torch)
+                        action_mean = _bounded_mean(action_mean, action_bounds, action_bound_limit)
+                        raw_actions_torch = action_mean + action_std * torch.randn_like(action_mean)
+                    else:
+                        raw_actions_torch = actor(obs_td, stochastic_output=True)
                     raw_actions_torch = torch.where(
                         torch.isfinite(raw_actions_torch),
                         raw_actions_torch,
@@ -347,7 +394,10 @@ def appo_collector_fn(
                     else:
                         low_torch, high_torch = action_bounds
                         actions_torch = torch.clamp(raw_actions_torch, low_torch, high_torch)
-                    log_probs_torch = actor.get_output_log_prob(actions_torch)
+                    if bounded_action_mean:
+                        log_probs_torch = _gaussian_log_prob(actions_torch, action_mean, action_std)
+                    else:
+                        log_probs_torch = actor.get_output_log_prob(actions_torch)
                     log_probs_torch = torch.where(
                         torch.isfinite(log_probs_torch),
                         log_probs_torch,

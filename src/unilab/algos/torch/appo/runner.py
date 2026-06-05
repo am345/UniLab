@@ -223,6 +223,7 @@ class APPORunner(AsyncRunner):
             vtrace_clip_c=algo_cfg.get("vtrace_clip_c", 1.0),
             action_bound_loss_coef=algo_cfg.get("action_bound_loss_coef", 0.0),
             action_bound_limit=algo_cfg.get("action_bound_limit", 1.0),
+            bounded_action_mean=algo_cfg.get("bounded_action_mean", False),
             enable_compile=algo_cfg.get("enable_compile", True),
         )
         return learner
