@@ -1140,11 +1140,11 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         wheel_contact_forces: np.ndarray,
     ) -> None:
         noise_cfg = self._cfg.noise_config
-        actor[:, 0:3] = self._obs_noise(base_angvel * 0.25, noise_cfg.scale_gyro)
-        actor[:, 3:6] = self._obs_noise(projected_gravity, noise_cfg.scale_gravity)
+        self._write_scaled_obs(actor[:, 0:3], base_angvel, 0.25, noise_cfg.scale_gyro)
+        self._write_obs(actor[:, 3:6], projected_gravity, noise_cfg.scale_gravity)
         np.multiply(commands, COMMAND_SCALE, out=actor[:, 6:11])
-        actor[:, 11:15] = self._obs_noise(leg_pos_rel, noise_cfg.scale_joint_angle)
-        actor[:, 15:19] = self._obs_noise(policy_leg_vel * 0.25, noise_cfg.scale_joint_vel)
+        self._write_obs(actor[:, 11:15], leg_pos_rel, noise_cfg.scale_joint_angle)
+        self._write_scaled_obs(actor[:, 15:19], policy_leg_vel, 0.25, noise_cfg.scale_joint_vel)
         actor[:, 19:21] = wheel_pos
         np.multiply(wheel_vel, 0.05, out=actor[:, 21:23])
         actor[:, 23:29] = current_actions
@@ -1162,6 +1162,23 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         critic[:, 32:35] = base_linvel
         critic[:, 35:37] = wheel_contact_forces
         critic[:, 37:38] = base_pos[:, 2:3]
+
+    def _write_obs(self, dst: np.ndarray, src: np.ndarray, noise_scale: float) -> None:
+        dst[:] = src
+        self._add_obs_noise_inplace(dst, noise_scale)
+
+    def _write_scaled_obs(
+        self, dst: np.ndarray, src: np.ndarray, src_scale: float, noise_scale: float
+    ) -> None:
+        np.multiply(src, src_scale, out=dst)
+        self._add_obs_noise_inplace(dst, noise_scale)
+
+    def _add_obs_noise_inplace(self, dst: np.ndarray, scale: float) -> None:
+        level = float(self._cfg.noise_config.level)
+        amplitude = level * float(scale)
+        if amplitude <= 0.0:
+            return
+        dst += np.random.uniform(-amplitude, amplitude, size=dst.shape).astype(dst.dtype)
 
     def _update_commands(self, info: dict[str, Any]) -> None:
         commands = info.get("commands")
