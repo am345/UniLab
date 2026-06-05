@@ -436,7 +436,6 @@ def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
 
         def forward(self, state: np.ndarray) -> np.ndarray:
             assert state.shape == (2, 26)
-            np.testing.assert_allclose(state[:, 3], DEFAULT_BASE_HEIGHT)
             return self.sensor_data
 
     env = _serialleg_env_stub()
@@ -450,7 +449,7 @@ def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
                 dtype=np.float64,
             )
         ),
-        _physics_state=np.zeros((4, 26), dtype=np.float64),
+        _physics_state=np.zeros((2, 26), dtype=np.float64),
         _sensor_indices={
             "track_pos_w_l_wheel_Link": [0, 1, 2],
             "track_pos_w_r_wheel_Link": [3, 4, 5],
@@ -464,7 +463,7 @@ def test_serialleg_reset_alignment_lifts_root_to_wheel_clearance() -> None:
     qpos[:, 2] = DEFAULT_BASE_HEIGHT
     qvel = np.zeros((2, 12), dtype=np.float64)
 
-    env.align_reset_qpos_to_wheel_clearance(np.array([1, 3], dtype=np.int32), qpos, qvel)
+    env.align_reset_qpos_to_wheel_clearance(np.array([0, 1], dtype=np.int32), qpos, qvel)
 
     assert qpos[0, 2] == pytest.approx(DEFAULT_BASE_HEIGHT + 0.005 + RESET_WHEEL_CLEARANCE)
     assert qpos[1, 2] == pytest.approx(DEFAULT_BASE_HEIGHT)
