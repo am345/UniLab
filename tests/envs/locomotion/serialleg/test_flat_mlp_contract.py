@@ -233,6 +233,19 @@ def test_serialleg_reset_obs_path_does_not_alias_full_obs_buffers() -> None:
     assert obs["critic"].shape == (1, CRITIC_OBS_DIM)
 
 
+def test_serialleg_missing_steps_reuses_zero_steps_buffer() -> None:
+    env = _serialleg_env_stub()
+    steps = np.array([3, 4], dtype=np.uint32)
+
+    missing_first = env._info_steps({})
+    missing_second = env._info_steps({})
+
+    assert missing_first is missing_second
+    np.testing.assert_array_equal(missing_first, [0, 0])
+    assert missing_first.dtype == np.uint32
+    assert env._info_steps({"steps": steps}) is steps
+
+
 def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
     env = _serialleg_env_stub()
     dof_pos = np.zeros((2, NUM_ACTIONS), dtype=np.float32)

@@ -444,6 +444,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._policy_order_torque_buf = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._bad_orientation_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._zero_steps = np.zeros((num_envs,), dtype=np.uint32)
         self._base_contact_force_buf = np.zeros((num_envs,), dtype=self._np_dtype)
         self._zero_base_contact_force = np.zeros((num_envs,), dtype=self._np_dtype)
         self._wheel_contact_force_buf = np.zeros(
@@ -1186,11 +1187,21 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             return
         commands_arr = np.asarray(commands, dtype=get_global_dtype())
         interval_steps = max(int(round(self._cfg.commands.resampling_time / self._cfg.ctrl_dt)), 1)
-        steps = np.asarray(info.get("steps", np.zeros((self._num_envs,), dtype=np.uint32)))
+        steps = self._info_steps(info)
         resample_mask = (steps > 0) & ((steps % interval_steps) == 0)
         if np.any(resample_mask):
             commands_arr[resample_mask] = self.sample_commands(int(np.count_nonzero(resample_mask)))
         info["commands"] = commands_arr
+
+    def _info_steps(self, info: dict[str, Any]) -> np.ndarray:
+        steps = info.get("steps")
+        if steps is None:
+            zero_steps = getattr(self, "_zero_steps", None)
+            if zero_steps is None or zero_steps.shape[0] != self._num_envs:
+                zero_steps = np.zeros((self._num_envs,), dtype=np.uint32)
+                self._zero_steps = zero_steps
+            return zero_steps
+        return np.asarray(steps)
 
     def _init_reward_functions(self) -> None:
         self._reward_fns: dict[str, Any] = {
@@ -1250,7 +1261,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             "policy_leg_vel": policy_leg_vel,
         }
         reward = np.zeros((base_pos.shape[0],), dtype=get_global_dtype())
-        step_count = info.get("steps", np.zeros((self._num_envs,), dtype=np.uint32))
+        step_count = self._info_steps(info)
         should_log = self._enable_reward_log and int(step_count[0]) % 4 == 0
         log = {} if should_log else info.get("log", {})
         for name, scale in self._reward_cfg.scales.items():
@@ -1445,7 +1456,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
 
     def _reward_leg_dof_acc(self, data: dict[str, Any]) -> np.ndarray:
         penalty = np.sum(np.square(self._policy_leg_acc), axis=1)
-        steps = np.asarray(data["info"].get("steps", np.zeros((self._num_envs,), dtype=np.uint32)))
+        steps = self._info_steps(data["info"])
         penalty = np.where(steps <= 1, 0.0, penalty)
         return np.asarray(penalty, dtype=get_global_dtype())
 
