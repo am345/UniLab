@@ -377,7 +377,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             cfg.scene,
             num_envs,
             cfg.sim_dt,
-            add_body_sensors=True,
+            add_body_sensors=False,
             base_name=cfg.asset.base_name,
             push_body_name=cfg.domain_rand.push_body_name,
             motrix_max_iterations=cfg.motrix_max_iterations,

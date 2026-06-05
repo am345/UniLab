@@ -655,6 +655,8 @@ def test_serialleg_xml_keeps_policy_order_sensor_contract() -> None:
         "local_linvel",
         "upvector",
         "robot_subtree_angmom",
+        "track_pos_w_l_wheel_Link",
+        "track_pos_w_r_wheel_Link",
         "base_contact",
         "l_wheel_contact",
         "r_wheel_contact",

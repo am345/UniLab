@@ -108,6 +108,8 @@
     <velocimeter name="local_linvel" site="imu" />
     <framezaxis name="upvector" objtype="site" objname="imu" />
     <subtreeangmom name="robot_subtree_angmom" body="base_link" />
+    <framepos name="track_pos_w_l_wheel_Link" objtype="body" objname="l_wheel_Link" />
+    <framepos name="track_pos_w_r_wheel_Link" objtype="body" objname="r_wheel_Link" />
     <contact name="base_contact" geom1="floor" body2="base_link" num="1" data="force" reduce="netforce" />
     <contact name="l_wheel_contact" geom1="floor" body2="l_wheel_Link" num="1" data="force" reduce="netforce" />
     <contact name="r_wheel_contact" geom1="floor" body2="r_wheel_Link" num="1" data="force" reduce="netforce" />
