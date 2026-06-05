@@ -114,9 +114,7 @@ def vtrace_advantages(
             vs_np = np.empty_like(values_np)
             vs_minus_v = np.zeros(N, dtype=np.float32)
             for t in range(T - 1, -1, -1):
-                vs_minus_v = (
-                    deltas_np[t] + gamma * non_terminal_np[t] * cs_np[t] * vs_minus_v
-                )
+                vs_minus_v = deltas_np[t] + gamma * non_terminal_np[t] * cs_np[t] * vs_minus_v
                 vs_np[t] = values_np[t] + vs_minus_v
 
             vs = torch.from_numpy(vs_np).to(device)
@@ -392,6 +390,7 @@ class APPOLearner:
         last_critic = batch_dict.get("last_critic", None)  # [N, C] or None
         behavior_log_probs = batch_dict["actions_log_prob"]  # [T, N]
         actions = batch_dict["actions"]  # [T, N, A]
+        raw_actions = batch_dict.get("raw_actions", actions)
 
         T, N = obs.shape[:2]
         obs_flat = obs.flatten(0, 1)  # [T*N, D]
@@ -451,6 +450,21 @@ class APPOLearner:
                 ),
                 "vtrace/rho_raw_p99": float(torch.quantile(rho_sample, 0.99).item()),
             }
+            raw_abs = _sample_tensor_for_metric(raw_actions.abs())
+            executed_abs = _sample_tensor_for_metric(actions.abs())
+            action_delta = _sample_tensor_for_metric((raw_actions - actions).abs())
+            batch_dict["_appo_process_metrics"].update(
+                {
+                    "action/raw_abs_mean": float(raw_abs.mean().item()),
+                    "action/raw_abs_p95": float(torch.quantile(raw_abs, 0.95).item()),
+                    "action/executed_abs_mean": float(executed_abs.mean().item()),
+                    "action/executed_abs_p95": float(torch.quantile(executed_abs, 0.95).item()),
+                    "action/raw_clip_delta_mean": float(action_delta.mean().item()),
+                    "action/raw_saturation_rate": float(
+                        (action_delta > 1e-6).float().mean().item()
+                    ),
+                }
+            )
 
         # V-trace targets and advantages
         vs, advantages = vtrace_advantages(

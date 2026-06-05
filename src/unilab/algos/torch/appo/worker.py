@@ -84,6 +84,24 @@ def _average_timing_ms(
     }
 
 
+def _action_bounds_tensors(env: Any, action_dim: int, device: str) -> tuple[Any, Any] | None:
+    action_space = getattr(env, "action_space", None)
+    low = getattr(action_space, "low", None)
+    high = getattr(action_space, "high", None)
+    if low is None or high is None:
+        return None
+    low_np = np.asarray(low, dtype=np.float32)
+    high_np = np.asarray(high, dtype=np.float32)
+    try:
+        low_np = np.broadcast_to(low_np, (action_dim,)).copy()
+        high_np = np.broadcast_to(high_np, (action_dim,)).copy()
+    except ValueError:
+        return None
+    if not (np.all(np.isfinite(low_np)) and np.all(np.isfinite(high_np))):
+        return None
+    return torch.from_numpy(low_np).to(device), torch.from_numpy(high_np).to(device)
+
+
 def _record_env_timing_ms(
     timing_accum_ms: dict[str, float],
     timing_counts: dict[str, int],
@@ -196,6 +214,7 @@ def appo_collector_fn(
     env: Any = registry.make(
         env_name, num_envs=num_envs, sim_backend=sim_backend, env_cfg_override=env_cfg_override
     )
+    action_bounds = _action_bounds_tensors(env, action_dim, collector_device)
 
     # Build actor (stochastic MLPModel — mirrors runner._build_learner)
     cfg = dict(rl_cfg)
@@ -314,8 +333,14 @@ def appo_collector_fn(
                 phase_start_ns = time.perf_counter_ns()
                 with torch.no_grad():
                     obs_torch.copy_(torch.from_numpy(obs_np))
-                    actions_torch = actor(obs_td, stochastic_output=True)
+                    raw_actions_torch = actor(obs_td, stochastic_output=True)
+                    if action_bounds is None:
+                        actions_torch = raw_actions_torch
+                    else:
+                        low_torch, high_torch = action_bounds
+                        actions_torch = torch.clamp(raw_actions_torch, low_torch, high_torch)
                     log_probs_torch = actor.get_output_log_prob(actions_torch)
+                    raw_actions_np = raw_actions_torch.cpu().numpy()
                     actions_np = actions_torch.cpu().numpy()
                 phase_start_ns = _record_phase_ms(
                     timing_accum_ms,
@@ -328,6 +353,7 @@ def appo_collector_fn(
                 if critic_np is not None:
                     write_buf["critic"][:, step, :] = critic_np
                 write_buf["actions"][:, step, :] = actions_np
+                write_buf["raw_actions"][:, step, :] = raw_actions_np
                 write_buf["log_probs"][:, step] = log_probs_torch.cpu().numpy().ravel()
                 phase_start_ns = _record_phase_ms(
                     timing_accum_ms,

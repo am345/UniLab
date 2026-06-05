@@ -14,6 +14,7 @@ _FIELD_SHAPES = {
     "obs": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns, od),
     "critic": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns, cd),
     "actions": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns, ad),
+    "raw_actions": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns, ad),
     "log_probs": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns),
     "rewards": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns),
     "dones": lambda ns_slots, ne, ns, od, ad, cd: (ns_slots, ne, ns),
