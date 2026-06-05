@@ -61,7 +61,7 @@ def _metric_backend_key(key: str) -> str:
 
 def _reward_backend_key(key: str) -> str:
     """Keep canonical reward/* keys intact; namespace bare component names under reward/."""
-    return key if key.startswith("reward/") else f"reward/{key}"
+    return key if "/" in key else f"reward/{key}"
 
 
 def _dedupe_metric_aliases(metrics: dict[str, float] | None) -> dict[str, float] | None:

@@ -494,8 +494,8 @@ def appo_collector_fn(
 
                 log_info = state.info.get("log", {})
                 for k, v in log_info.items():
-                    if k.startswith("reward/"):
-                        ep_reward_components[k].append(v)
+                    if k.startswith(("reward/", "Recovery/")) and np.isfinite(v):
+                        ep_reward_components[k].append(float(v))
 
                 if metrics_queue is not None and total_steps % (num_envs * 10) == 0 and ep_rewards:
                     try:
