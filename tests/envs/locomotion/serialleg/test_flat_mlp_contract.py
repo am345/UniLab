@@ -479,6 +479,62 @@ def test_serialleg_leg_dof_acc_ignores_first_two_episode_steps() -> None:
     np.testing.assert_allclose(penalty, [0.0, 36.0])
 
 
+def test_serialleg_termination_root_velocity_thresholds_match_contract() -> None:
+    env = _serialleg_env_stub(num_envs=4)
+    env._bad_orientation_steps = np.zeros((4,), dtype=np.int32)
+    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (4, 4)).copy()
+    base_pos = np.zeros((4, 3), dtype=np.float32)
+    base_pos[:, 2] = DEFAULT_BASE_HEIGHT
+    base_linvel = np.array(
+        [[80.0, 0.0, 0.0], [80.1, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    base_angvel = np.array(
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [500.1, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    projected_gravity = np.broadcast_to([0.0, 0.0, -1.0], (4, 3)).astype(np.float32)
+    dof_pos = np.zeros((4, NUM_ACTIONS), dtype=np.float32)
+    dof_vel = np.zeros((4, NUM_ACTIONS), dtype=np.float32)
+    policy_leg_pos = env._default_policy_leg_pos.copy()
+    policy_leg_vel = np.zeros((4, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+
+    terminated = env._compute_terminated(
+        base_pos,
+        base_linvel,
+        base_angvel,
+        projected_gravity,
+        dof_pos,
+        dof_vel,
+        policy_leg_pos,
+        policy_leg_vel,
+    )
+
+    np.testing.assert_array_equal(terminated, [False, True, False, True])
+
+
+def test_serialleg_stand_still_reward_uses_command_norm_threshold() -> None:
+    env = _serialleg_env_stub()
+    env._reward_cfg = env._cfg.reward_config
+    data = {
+        "info": {
+            "commands": np.array(
+                [
+                    [0.06, 0.08, 0.0, 0.0, DEFAULT_BASE_HEIGHT],
+                    [0.08, 0.08, 0.0, 0.0, DEFAULT_BASE_HEIGHT],
+                ],
+                dtype=np.float32,
+            )
+        },
+        "policy_leg_pos": env._default_policy_leg_pos + 1.0,
+        "projected_gravity": np.array([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]], dtype=np.float32),
+    }
+
+    reward = env._reward_stand_still(data)
+
+    np.testing.assert_allclose(reward, [4.0, 0.0])
+
+
 def test_serialleg_push_schedule_uses_se3_velocity_disturbance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1232,8 +1232,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         )
         leg_pos_bad = np.any(np.abs(policy_leg_pos - self._default_policy_leg_pos) > 3.0, axis=1)
         leg_vel_bad = np.any(np.abs(policy_leg_vel) > 120.0, axis=1)
-        root_lin_bad = np.linalg.norm(base_linvel, axis=1) > 80.0
-        root_ang_bad = np.linalg.norm(base_angvel, axis=1) > 500.0
+        root_lin_bad = np.sum(np.square(base_linvel), axis=1) > 80.0 * 80.0
+        root_ang_bad = np.sum(np.square(base_angvel), axis=1) > 500.0 * 500.0
         height_bad = (base_pos[:, 2] < -0.5) | (base_pos[:, 2] > 3.0)
         tilt = np.arccos(np.clip(-projected_gravity[:, 2], -1.0, 1.0))
         bad_orientation = tilt > 0.5236
@@ -1371,10 +1371,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
 
     def _reward_stand_still(self, data: dict[str, Any]) -> np.ndarray:
         commands = data["info"]["commands"]
-        stopped = (
-            np.linalg.norm(commands[:, :2], axis=1)
-            <= self._reward_cfg.stand_still_command_threshold
-        )
+        command_threshold_sq = self._reward_cfg.stand_still_command_threshold**2
+        stopped = np.sum(np.square(commands[:, :2]), axis=1) <= command_threshold_sq
         diff = data["policy_leg_pos"] - self._default_policy_leg_pos
         height_scale = np.exp(
             -self._reward_cfg.stand_still_height_tolerance
