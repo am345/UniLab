@@ -62,6 +62,7 @@ class APPORunner(AsyncRunner):
         steps_per_env: int = 24,
         num_workers: int = 1,
         rollouts_per_update: int | None = None,
+        min_rollouts_for_update: int | None = None,
         replay_queue_size: int = 3,
         seed: int | None = None,
         resume_path: str | None = None,
@@ -87,7 +88,7 @@ class APPORunner(AsyncRunner):
             # Preserve the historical learner batch size: all active replay slots
             # across all workers are visible to the learner.
             self.rollouts_per_update = self.replay_queue_size * self.num_workers
-            self._min_rollouts_for_update = self.num_workers
+            default_min_rollouts_for_update = self.num_workers
         else:
             self.rollouts_per_update = int(rollouts_per_update)
             if self.rollouts_per_update < 1:
@@ -96,7 +97,16 @@ class APPORunner(AsyncRunner):
             # batch size.  Waiting for more than one rollout keeps updates from
             # degenerating into single-worker PPO, while larger worker counts can
             # still keep IPC queues warm.
-            self._min_rollouts_for_update = min(self.rollouts_per_update, self.num_workers)
+            default_min_rollouts_for_update = min(self.rollouts_per_update, self.num_workers)
+        self._explicit_min_rollouts_for_update = min_rollouts_for_update is not None
+        if min_rollouts_for_update is None:
+            self._min_rollouts_for_update = default_min_rollouts_for_update
+        else:
+            self._min_rollouts_for_update = int(min_rollouts_for_update)
+            if self._min_rollouts_for_update < 1:
+                raise ValueError("APPO min_rollouts_for_update must be >= 1")
+            if self._min_rollouts_for_update > self.rollouts_per_update:
+                raise ValueError("APPO min_rollouts_for_update must be <= rollouts_per_update")
         self.ring_num_slots = _ring_slots_from_replay_queue_size(self.replay_queue_size)
         self.staging_pool_size = self.rollouts_per_update
         self.seed = seed
@@ -264,6 +274,17 @@ class APPORunner(AsyncRunner):
                     break
         return planned
 
+    def _min_ready_rollouts_for_update(self, active_staged_rollouts: int) -> int:
+        if (
+            self._explicit_min_rollouts_for_update
+            and active_staged_rollouts < self.rollouts_per_update
+        ):
+            return max(
+                self._min_rollouts_for_update,
+                self.rollouts_per_update - int(active_staged_rollouts),
+            )
+        return self._min_rollouts_for_update
+
     def learn(
         self,
         max_iterations: int = 1500,
@@ -393,6 +414,7 @@ class APPORunner(AsyncRunner):
             f"(staging_pool={self.staging_pool_size}, "
             f"workers={self.num_workers}, "
             f"rollouts_per_update={self.rollouts_per_update}, "
+            f"min_rollouts_for_update={self._min_rollouts_for_update}, "
             f"epochs={learner.num_learning_epochs})"
         )
         logger_started = False
@@ -418,10 +440,11 @@ class APPORunner(AsyncRunner):
                 log_total_steps=False,
             )
             wait_start = time.time()
+            min_ready_rollouts = self._min_ready_rollouts_for_update(staging_pool.active_count)
 
             data_ready = self._wait_for_rollouts(
                 rollout_ring_buffers,
-                min_ready=self._min_rollouts_for_update,
+                min_ready=min_ready_rollouts,
                 timeout=60.0,
             )
             if not data_ready:
@@ -509,6 +532,8 @@ class APPORunner(AsyncRunner):
             metrics["staging_pool_len"] = float(staging_pool.active_count)
             metrics["staging_pool_capacity"] = float(staging_pool.capacity)
             metrics["available_on_arrive"] = float(available_on_arrive)
+            metrics["min_rollouts_for_update"] = float(self._min_rollouts_for_update)
+            metrics["min_ready_rollouts"] = float(min_ready_rollouts)
             metrics["rollouts_read"] = float(num_new)
             metrics["rollouts_left_in_rings"] = float(max(0, available_on_arrive - num_new))
             metrics["rollouts_per_update"] = float(self.rollouts_per_update)

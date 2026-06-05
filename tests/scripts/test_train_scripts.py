@@ -231,7 +231,9 @@ def test_appo_runner_kwargs_forward_algorithm_num_workers():
 
 def test_appo_runner_kwargs_forward_rollouts_per_update():
     mod = _train_appo()
-    cfg = _appo_cfg(["algo.num_workers=4", "algo.rollouts_per_update=2"])
+    cfg = _appo_cfg(
+        ["algo.num_workers=4", "algo.rollouts_per_update=2", "algo.min_rollouts_for_update=1"]
+    )
     rl_cfg = OmegaConf.to_container(cfg.algo, resolve=True)
 
     kwargs = mod.build_appo_runner_kwargs(
@@ -243,6 +245,7 @@ def test_appo_runner_kwargs_forward_rollouts_per_update():
 
     assert kwargs["num_workers"] == 4
     assert kwargs["rollouts_per_update"] == 2
+    assert kwargs["min_rollouts_for_update"] == 1
 
 
 def test_appo_runner_kwargs_default_load_run_does_not_resume(

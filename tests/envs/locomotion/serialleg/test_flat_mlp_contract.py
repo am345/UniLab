@@ -415,6 +415,7 @@ def test_serialleg_appo_owner_config_feeds_env_override() -> None:
     assert cfg.algo.num_envs == 4096
     assert cfg.algo.num_workers == 4
     assert cfg.algo.rollouts_per_update == 4
+    assert cfg.algo.min_rollouts_for_update is None
     assert cfg.algo.steps_per_env == 16
     assert cfg.algo.actor.hidden_dims == [512, 256, 128]
     assert cfg.algo.actor.distribution_cfg.init_std == pytest.approx(0.5)

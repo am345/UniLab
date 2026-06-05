@@ -55,8 +55,9 @@ def build_appo_runner_kwargs(
         "collector_device": collector_device,
         "num_envs": cfg.algo.num_envs,
         "num_workers": int(OmegaConf.select(cfg, "algo.num_workers", default=1)),
-        "rollouts_per_update": OmegaConf.select(
-            cfg, "algo.rollouts_per_update", default=None
+        "rollouts_per_update": OmegaConf.select(cfg, "algo.rollouts_per_update", default=None),
+        "min_rollouts_for_update": OmegaConf.select(
+            cfg, "algo.min_rollouts_for_update", default=None
         ),
         "steps_per_env": cfg.algo.steps_per_env,
         "sim_backend": cfg.training.sim_backend,

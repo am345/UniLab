@@ -533,6 +533,77 @@ def test_appo_runner_rollouts_per_update_caps_learner_batch(
     assert step["metrics"]["train_batch_env_steps"] == 16.0
 
 
+def test_appo_runner_min_rollouts_for_update_keeps_full_staging_pool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    def fake_detect_dims(self: APPORunner) -> tuple[int, int]:
+        self.critic_dim = 7
+        self.critic_input_dim = 5
+        return (4, 2)
+
+    _FakeRolloutRingBuffer.available_rollouts_by_instance = [2, 1]
+    monkeypatch.setattr(APPORunner, "_detect_dims", fake_detect_dims)
+    monkeypatch.setattr(APPORunner, "_build_learner", lambda self: _FakeLearner())
+    monkeypatch.setattr(APPORunner, "_check_collector_alive", lambda self: True)
+    monkeypatch.setattr(appo_runner_module, "RolloutRingBuffer", _FakeRolloutRingBuffer)
+    monkeypatch.setattr(appo_runner_module, "SharedWeightSync", _FakeWeightSync)
+    monkeypatch.setattr(appo_runner_module, "OffPolicyLogger", _FakeLogger)
+    monkeypatch.setattr(appo_runner_module.mp, "get_context", lambda method: queue)
+    monkeypatch.setattr(appo_runner_module.torch, "save", lambda *args, **kwargs: None)
+
+    fake_clock = _FakeClock(
+        [100.0, 100.0, 100.25, 100.25, 100.75, 101.0, 101.25, 101.25, 101.75, 102.0]
+    )
+    monkeypatch.setattr(appo_runner_module.time, "time", fake_clock.time)
+
+    runner = APPORunner(
+        env_name="DummyEnv",
+        env_cfg_overrides={},
+        rl_cfg={"actor": {}, "critic": {}, "algorithm": {}},
+        device="cpu",
+        collector_device="cpu",
+        sim_backend="mujoco",
+        num_envs=2,
+        steps_per_env=4,
+        num_workers=2,
+        replay_queue_size=3,
+        rollouts_per_update=2,
+        min_rollouts_for_update=1,
+    )
+    monkeypatch.setattr(runner, "_start_collector", lambda *args, **kwargs: None)
+
+    runner.learn(max_iterations=2, save_interval=0, log_dir=str(tmp_path))
+
+    logger = _FakeLogger.last_instance
+    learner = _FakeLearner.last_instance
+    assert logger is not None
+    assert learner is not None
+    assert logger.collection_sync_calls == [(True, 8)]
+
+    first_ring, second_ring = _FakeRolloutRingBuffer.instances
+    assert first_ring.advance_calls == 2
+    assert second_ring.advance_calls == 1
+    assert len(logger.step_calls) == 2
+
+    first_step, second_step = logger.step_calls
+    assert first_step["metrics"]["min_ready_rollouts"] == 2.0
+    assert first_step["metrics"]["rollouts_read"] == 2.0
+    assert first_step["metrics"]["staging_pool_len"] == 2.0
+    assert second_step["metrics"]["min_ready_rollouts"] == 1.0
+    assert second_step["metrics"]["min_rollouts_for_update"] == 1.0
+    assert second_step["metrics"]["rollouts_read"] == 1.0
+    assert second_step["metrics"]["rollouts_in_update"] == 2.0
+    assert second_step["metrics"]["rollouts_overwritten"] == 1.0
+    assert second_step["metrics"]["train_batch_env_steps"] == 16.0
+
+    assert learner.last_batch is not None
+    assert learner.last_batch["observations"].shape == (4, 4, 4)
+    assert torch.equal(
+        torch.unique(learner.last_batch["observations"]),
+        torch.tensor([2.0, 11.0]),
+    )
+
+
 def test_appo_runner_stages_multiple_rollouts_without_runner_cat(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
