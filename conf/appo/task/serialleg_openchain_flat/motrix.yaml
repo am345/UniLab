@@ -1,0 +1,48 @@
+# @package _global_
+training:
+  task_name: SerialLegOpenChainFlat
+  sim_backend: motrix
+algo:
+  num_envs: 4096
+  num_workers: 4
+  rollouts_per_update: 4
+  steps_per_env: 16
+  max_iterations: 150
+env:
+  render_offset_mode: zero
+  motrix_max_iterations: 3
+  commands:
+    vel_limit:
+      - [0.0, 0.0, -1.0]
+      - [1.0, 0.0, 1.0]
+    resampling_time: 5.0
+    rel_standing_envs: 0.1
+  control_config:
+    leg_action_scale: [0.35, 0.12, 0.35, 0.12]
+    wheel_action_scale: 45.0
+    Kp: 40.0
+    Kd: 2.0
+    wheel_Kd: 0.5
+    clip_actions: 1.0
+  domain_rand:
+    randomize_kp: false
+    randomize_kd: false
+    push_robots: false
+reward:
+  scales:
+    tracking_lin_vel: 1.0
+    tracking_ang_vel: 0.75
+    lin_vel_z: -5.0
+    ang_vel_xy: -0.1
+    base_height: -100.0
+    orientation: -2.0
+    action_rate: -0.005
+    similar_to_default: -0.5
+    joint_torques_l2: -0.0002
+    joint_acc_l2: -2.0e-7
+    wheel_acc: -1.0e-8
+    stand_still: -0.5
+    alive: 0.5
+    upward: 1.0
+  tracking_sigma: 0.25
+  base_height_target: 0.22
