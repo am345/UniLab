@@ -508,6 +508,8 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             np.clip(nominal_steps, self._min_delay_steps, self._max_delay_steps)
         )
         self._delay_steps = np.full((num_envs,), self._nominal_delay_steps, dtype=np.int32)
+        self._delay_steps_intp = self._delay_steps.astype(np.intp)
+        self._env_row_indices = np.arange(num_envs, dtype=np.intp)
         self._action_delay_fifo = np.zeros(
             (self._max_delay_steps + 1, num_envs, NUM_ACTIONS), dtype=self._np_dtype
         )
@@ -822,6 +824,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             self._delay_steps[env_ids] = (
                 self._nominal_delay_steps if delay_cfg.action_delay_enabled else 0
             )
+        self._delay_steps_intp[env_ids] = self._delay_steps[env_ids]
         self._last_motor_ctrl[env_ids] = 0.0
         self._policy_leg_torque[env_ids] = 0.0
         self._policy_leg_vel[env_ids] = 0.0
@@ -932,8 +935,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._action_delay_fifo[0] = np.asarray(policy_ctrl, dtype=self._np_dtype)
         if not self._cfg.control_config.action_delay_enabled:
             return self._action_delay_fifo[0]
-        env_ids = np.arange(self._num_envs, dtype=np.intp)
-        return self._action_delay_fifo[self._delay_steps.astype(np.intp), env_ids]
+        return self._action_delay_fifo[self._delay_steps_intp, self._env_row_indices]
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._update_commands(state.info)

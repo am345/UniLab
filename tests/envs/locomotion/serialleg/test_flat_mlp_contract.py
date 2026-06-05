@@ -207,6 +207,47 @@ def test_serialleg_identity_dof_order_avoids_numpy_index_copy() -> None:
     assert env.get_dof_vel() is dof_vel
 
 
+def test_serialleg_action_delay_indices_are_cached_and_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _serialleg_env_stub()
+    env._np_dtype = np.float32
+    env._leg_kp = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._leg_kd = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)).copy()
+    env._last_motor_ctrl = np.zeros((2, NUM_ACTIONS), dtype=np.float32)
+    env._policy_leg_torque = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_vel = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_pos = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._policy_leg_acc = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._last_policy_leg_vel = np.zeros((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+    env._bad_orientation_steps = np.zeros((2,), dtype=np.int32)
+    env._cfg.control_config.action_delay_enabled = True
+    env._cfg.control_config.randomize_action_delay = True
+    env._cfg.control_config.min_action_delay_s = 0.0
+    env._cfg.control_config.max_action_delay_s = 0.01
+    env._cfg.control_config.action_delay_s = 0.005
+    env._init_action_delay_buffers(num_envs=2)
+
+    monkeypatch.setattr(np.random, "randint", lambda *args, **kwargs: np.array([2, 1]))
+    env.set_reset_runtime(
+        np.array([0, 1], dtype=np.int32),
+        leg_kp=np.ones((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        leg_kd=np.ones((2, NUM_POLICY_LEG_ACTIONS), dtype=np.float32),
+        default_policy_leg_pos=np.broadcast_to(DEFAULT_POLICY_LEG_POS, (2, 4)),
+    )
+
+    assert env._env_row_indices.dtype == np.intp
+    assert env._delay_steps_intp.dtype == np.intp
+    np.testing.assert_array_equal(env._delay_steps_intp, [2, 1])
+
+    env._action_delay_fifo[0, :, :] = 5.0
+    env._action_delay_fifo[1, :, :] = 10.0
+    delayed = env._select_delayed_actions(np.zeros((2, NUM_ACTIONS), dtype=np.float32))
+
+    np.testing.assert_allclose(delayed[:, 0], [10.0, 5.0])
+
+
 def test_serialleg_contact_rewards_use_precomputed_contact_arrays() -> None:
     env = _serialleg_env_stub()
     env._reward_cfg = env._cfg.reward_config
