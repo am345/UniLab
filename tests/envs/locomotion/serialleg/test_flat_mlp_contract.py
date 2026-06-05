@@ -16,18 +16,22 @@ from unilab.base.registry import apply_cfg_overrides
 from unilab.dr.types import RESET_TERM_KD, RESET_TERM_KP
 from unilab.envs.locomotion.serialleg.flat_mlp import (
     ACTOR_OBS_DIM,
+    BASE_CONTACT_SENSOR_NAME,
     COMMAND_SCALE,
+    CONTACT_SENSOR_FORCE_DIM,
     CRITIC_OBS_DIM,
     DEFAULT_BASE_HEIGHT,
     DEFAULT_OUTPUT_LEG_POS,
     DEFAULT_POLICY_LEG_POS,
     FOURBAR_WHEEL_RADIUS,
     LEG_ACTION_SCALE,
+    LEG_CONTACT_SENSOR_NAMES,
     NUM_ACTIONS,
     NUM_POLICY_LEG_ACTIONS,
     OUTPUT_LEG_INDICES,
     RESET_WHEEL_CLEARANCE,
     WHEEL_ACTION_SCALE,
+    WHEEL_CONTACT_SENSOR_NAMES,
     WHEEL_INDICES,
     SerialLegFlatMLPCfg,
     SerialLegFlatMLPEnv,
@@ -341,6 +345,70 @@ def test_serialleg_contact_force_buffers_are_reused() -> None:
     np.testing.assert_allclose(leg_contact, [[1.0, 3.0, 5.0, 7.0], [2.0, 4.0, 6.0, 8.0]])
     assert env._wheel_contact_forces() is wheel_contact
     assert env._leg_contact_forces() is leg_contact
+
+
+def test_serialleg_contact_forces_use_backend_batch_sensor_read() -> None:
+    env = _serialleg_env_stub()
+    env._base_contact_force_buf = np.zeros((2,), dtype=np.float32)
+    env._zero_base_contact_force = np.zeros((2,), dtype=np.float32)
+    env._wheel_contact_force_buf = np.zeros((2, 2), dtype=np.float32)
+    env._leg_contact_force_buf = np.zeros((2, 4), dtype=np.float32)
+    env._zero_leg_contact_forces = np.zeros((2, 4), dtype=np.float32)
+    expected_names = (
+        *WHEEL_CONTACT_SENSOR_NAMES,
+        BASE_CONTACT_SENSOR_NAME,
+        *LEG_CONTACT_SENSOR_NAMES,
+    )
+    sensor_vectors = np.asarray(
+        [
+            [
+                [3.0, 4.0, 0.0],
+                [1.0, 2.0, 2.0],
+                [0.0, 0.0, 2.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [4.0, 0.0, 0.0],
+            ],
+            [
+                [0.0, 0.0, 7.0],
+                [0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [0.0, 6.0, 0.0],
+                [0.0, 0.0, 7.0],
+                [8.0, 0.0, 0.0],
+            ],
+        ],
+        dtype=np.float32,
+    )
+    batch = sensor_vectors.reshape(2, len(expected_names) * CONTACT_SENSOR_FORCE_DIM)
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def get_sensor_data_batch(self, names: tuple[str, ...] | list[str]) -> np.ndarray:
+            self.calls.append(tuple(names))
+            return batch
+
+        def get_sensor_data(self, name: str) -> np.ndarray:
+            pytest.fail(f"unexpected per-sensor read: {name}")
+
+    backend = FakeBackend()
+    env._backend = backend
+
+    base_contact, wheel_contact, leg_contact = env._contact_forces(
+        include_base=True, include_leg=True
+    )
+
+    assert backend.calls == [expected_names]
+    assert base_contact is env._base_contact_force_buf
+    assert wheel_contact is env._wheel_contact_force_buf
+    assert leg_contact is env._leg_contact_force_buf
+    np.testing.assert_allclose(base_contact, [2.0, 4.0])
+    np.testing.assert_allclose(wheel_contact, [[5.0, 3.0], [7.0, 0.0]])
+    np.testing.assert_allclose(leg_contact, [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
 
 
 def test_serialleg_contact_rewards_use_precomputed_contact_arrays() -> None:

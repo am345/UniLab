@@ -60,6 +60,15 @@ NATIVE_JOINT_NAMES: tuple[str, ...] = (
 OUTPUT_LEG_INDICES = np.asarray([0, 1, 3, 4], dtype=np.int32)
 WHEEL_INDICES = np.asarray([2, 5], dtype=np.int32)
 WHEEL_BODY_NAMES: tuple[str, ...] = ("l_wheel_Link", "r_wheel_Link")
+BASE_CONTACT_SENSOR_NAME = "base_contact"
+WHEEL_CONTACT_SENSOR_NAMES: tuple[str, ...] = ("l_wheel_contact", "r_wheel_contact")
+LEG_CONTACT_SENSOR_NAMES: tuple[str, ...] = (
+    "lf0_contact",
+    "lf1_contact",
+    "rf0_contact",
+    "rf1_contact",
+)
+CONTACT_SENSOR_FORCE_DIM = 3
 
 NUM_ACTIONS = 6
 NUM_POLICY_LEG_ACTIONS = 4
@@ -434,6 +443,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         self._policy_order_torque_buf = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._bad_orientation_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._base_contact_force_buf = np.zeros((num_envs,), dtype=self._np_dtype)
         self._zero_base_contact_force = np.zeros((num_envs,), dtype=self._np_dtype)
         self._wheel_contact_force_buf = np.zeros(
             (num_envs, NUM_WHEEL_ACTIONS), dtype=self._np_dtype
@@ -960,16 +970,9 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         base_pos, base_linvel, base_angvel, projected_gravity = self.base_state()
         dof_pos = self.get_dof_pos()
         dof_vel = self.get_dof_vel()
-        base_contact_force = (
-            self._sensor_scalar("base_contact")
-            if self._reward_scale_enabled("collision")
-            else self._zero_base_contact_force
-        )
-        wheel_contact_forces = self._wheel_contact_forces()
-        leg_contact_forces = (
-            self._leg_contact_forces()
-            if self._reward_scale_enabled("upright_leg_contact")
-            else self._zero_leg_contact_forces
+        base_contact_force, wheel_contact_forces, leg_contact_forces = self._contact_forces(
+            include_base=self._reward_scale_enabled("collision"),
+            include_leg=self._reward_scale_enabled("upright_leg_contact"),
         )
         output_leg_pos = dof_pos[:, OUTPUT_LEG_INDICES]
         output_leg_vel = dof_vel[:, OUTPUT_LEG_INDICES]
@@ -1485,6 +1488,51 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         contact[:, 3] = self._sensor_scalar("rf1_contact")
         return contact
 
+    def _contact_forces(
+        self, *, include_base: bool, include_leg: bool
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        names = list(WHEEL_CONTACT_SENSOR_NAMES)
+        base_index: int | None = None
+        leg_start_index: int | None = None
+        if include_base:
+            base_index = len(names)
+            names.append(BASE_CONTACT_SENSOR_NAME)
+        if include_leg:
+            leg_start_index = len(names)
+            names.extend(LEG_CONTACT_SENSOR_NAMES)
+        try:
+            batch = np.asarray(self._backend.get_sensor_data_batch(names), dtype=np.float64)
+        except (AttributeError, KeyError, NotImplementedError):
+            base = (
+                self._sensor_scalar(BASE_CONTACT_SENSOR_NAME)
+                if include_base
+                else self._zero_base_contact_force
+            )
+            leg = self._leg_contact_forces() if include_leg else self._zero_leg_contact_forces
+            return base, self._wheel_contact_forces(), leg
+
+        for column, sensor_index in enumerate(range(len(WHEEL_CONTACT_SENSOR_NAMES))):
+            self._fill_contact_force(batch, sensor_index, self._wheel_contact_force_buf[:, column])
+        base = self._zero_base_contact_force
+        if base_index is not None:
+            base = self._fill_contact_force(batch, base_index, self._base_contact_force_buf)
+        leg = self._zero_leg_contact_forces
+        if leg_start_index is not None:
+            leg = self._leg_contact_force_buf
+            for column, sensor_index in enumerate(
+                range(leg_start_index, leg_start_index + len(LEG_CONTACT_SENSOR_NAMES))
+            ):
+                self._fill_contact_force(batch, sensor_index, leg[:, column])
+        return base, self._wheel_contact_force_buf, leg
+
+    def _fill_contact_force(
+        self, batch: np.ndarray, sensor_index: int, out: np.ndarray
+    ) -> np.ndarray:
+        start = int(sensor_index) * CONTACT_SENSOR_FORCE_DIM
+        force = batch[:, start : start + CONTACT_SENSOR_FORCE_DIM]
+        magnitude = np.sqrt(np.sum(np.square(force), axis=1))
+        return self._finite_contact_force_into(magnitude, out)
+
     def _sensor_scalar(self, name: str) -> np.ndarray:
         try:
             values = np.asarray(self._backend.get_sensor_data(name), dtype=get_global_dtype())
@@ -1495,6 +1543,18 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
             force_mag = np.linalg.norm(flat[:, :3], axis=1)
             return self._finite_contact_force(force_mag)
         return self._finite_contact_force(flat[:, 0])
+
+    def _finite_contact_force_into(self, force: np.ndarray, out: np.ndarray) -> np.ndarray:
+        np.copyto(out, force, casting="same_kind")
+        np.nan_to_num(
+            out,
+            copy=False,
+            nan=CONTACT_FORCE_MAX_N,
+            posinf=CONTACT_FORCE_MAX_N,
+            neginf=0.0,
+        )
+        np.clip(out, 0.0, CONTACT_FORCE_MAX_N, out=out)
+        return out
 
     def _finite_contact_force(self, force: np.ndarray) -> np.ndarray:
         finite = np.nan_to_num(
