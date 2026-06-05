@@ -16,6 +16,7 @@ from unilab.base.registry import apply_cfg_overrides
 from unilab.dr.types import RESET_TERM_KD, RESET_TERM_KP
 from unilab.envs.locomotion.serialleg.flat_mlp import (
     ACTOR_OBS_DIM,
+    BAD_ORIENTATION_COS_THRESHOLD,
     BASE_CONTACT_SENSOR_NAME,
     COMMAND_SCALE,
     CONTACT_SENSOR_FORCE_DIM,
@@ -603,6 +604,42 @@ def test_serialleg_termination_root_velocity_thresholds_match_contract() -> None
     )
 
     np.testing.assert_array_equal(terminated, [False, True, False, True])
+
+
+def test_serialleg_bad_orientation_uses_cos_threshold_without_arccos() -> None:
+    env = _serialleg_env_stub(num_envs=3)
+    env._bad_orientation_steps = np.array([100, 100, 0], dtype=np.int32)
+    env._default_policy_leg_pos = np.broadcast_to(DEFAULT_POLICY_LEG_POS, (3, 4)).copy()
+    base_pos = np.zeros((3, 3), dtype=np.float32)
+    base_pos[:, 2] = DEFAULT_BASE_HEIGHT
+    base_linvel = np.zeros((3, 3), dtype=np.float32)
+    base_angvel = np.zeros((3, 3), dtype=np.float32)
+    projected_gravity = np.array(
+        [
+            [0.0, 0.0, -(BAD_ORIENTATION_COS_THRESHOLD - 1.0e-4)],
+            [0.0, 0.0, -BAD_ORIENTATION_COS_THRESHOLD],
+            [0.0, 0.0, np.nan],
+        ],
+        dtype=np.float32,
+    )
+    dof_pos = np.zeros((3, NUM_ACTIONS), dtype=np.float32)
+    dof_vel = np.zeros((3, NUM_ACTIONS), dtype=np.float32)
+    policy_leg_pos = env._default_policy_leg_pos.copy()
+    policy_leg_vel = np.zeros((3, NUM_POLICY_LEG_ACTIONS), dtype=np.float32)
+
+    terminated = env._compute_terminated(
+        base_pos,
+        base_linvel,
+        base_angvel,
+        projected_gravity,
+        dof_pos,
+        dof_vel,
+        policy_leg_pos,
+        policy_leg_vel,
+    )
+
+    np.testing.assert_array_equal(terminated, [True, False, True])
+    np.testing.assert_array_equal(env._bad_orientation_steps, [101, 0, 0])
 
 
 def test_serialleg_stand_still_reward_uses_command_norm_threshold() -> None:

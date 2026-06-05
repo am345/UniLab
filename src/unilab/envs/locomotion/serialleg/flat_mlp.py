@@ -103,6 +103,7 @@ LEG_ACTION_SCALE = np.asarray([0.35, 0.25, 0.35, 0.25], dtype=np.float64)
 WHEEL_ACTION_SCALE = 45.0
 COMMAND_SCALE = np.asarray([2.0, 0.25, 5.0, 5.0, 5.0], dtype=np.float64)
 CONTACT_FORCE_MAX_N = 5000.0
+BAD_ORIENTATION_COS_THRESHOLD = math.cos(0.5236)
 DM8009P_STALL_TORQUE = 40.0
 DM8009P_NO_LOAD_SPEED = 160.0 * 2.0 * math.pi / 60.0
 DM8009P_RATED_TORQUE = 20.0
@@ -1272,8 +1273,7 @@ class SerialLegFlatMLPEnv(LocomotionBaseEnv):
         root_lin_bad = np.sum(np.square(base_linvel), axis=1) > 80.0 * 80.0
         root_ang_bad = np.sum(np.square(base_angvel), axis=1) > 500.0 * 500.0
         height_bad = (base_pos[:, 2] < -0.5) | (base_pos[:, 2] > 3.0)
-        tilt = np.arccos(np.clip(-projected_gravity[:, 2], -1.0, 1.0))
-        bad_orientation = tilt > 0.5236
+        bad_orientation = -projected_gravity[:, 2] < BAD_ORIENTATION_COS_THRESHOLD
         self._bad_orientation_steps[bad_orientation] += 1
         self._bad_orientation_steps[~bad_orientation] = 0
         delayed_bad_orientation = self._bad_orientation_steps > 100
