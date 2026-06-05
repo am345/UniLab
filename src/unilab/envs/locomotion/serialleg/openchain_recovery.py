@@ -421,14 +421,14 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
     def _upright_gate(self, gravity: np.ndarray | None, num_envs: int) -> np.ndarray:
         if gravity is None:
             return np.ones((num_envs,), dtype=get_global_dtype())
-        return np.asarray(np.clip(-gravity[:, 2], 0.0, 0.7) / 0.7, dtype=get_global_dtype())
+        return np.asarray(np.clip(gravity[:, 2], 0.0, 0.7) / 0.7, dtype=get_global_dtype())
 
     def _upright_contact_gate(self, gravity: np.ndarray | None, num_envs: int) -> np.ndarray:
         if gravity is None:
             return np.ones((num_envs,), dtype=get_global_dtype())
         soft = float(self._reward_cfg.upright_contact_soft_cos)
         hard = float(self._reward_cfg.upright_contact_hard_cos)
-        upright_cos = -gravity[:, 2]
+        upright_cos = gravity[:, 2]
         if hard <= soft:
             return np.asarray((upright_cos >= hard).astype(get_global_dtype()))
         gate = np.clip((upright_cos - soft) / (hard - soft), 0.0, 1.0)
@@ -512,11 +512,11 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
 
     def _reward_upward(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.gravity is not None
-        return np.asarray(np.square(1.0 - ctx.gravity[:, 2]), dtype=get_global_dtype())
+        return np.asarray(np.square(1.0 + ctx.gravity[:, 2]), dtype=get_global_dtype())
 
     def _reward_upward_progress(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.gravity is not None
-        score = np.asarray(np.square(1.0 - ctx.gravity[:, 2]), dtype=get_global_dtype())
+        score = np.asarray(np.square(1.0 + ctx.gravity[:, 2]), dtype=get_global_dtype())
         if score.shape != self._prev_upward_score.shape:
             return np.zeros((ctx.num_envs,), dtype=get_global_dtype())
         delta = (score - self._prev_upward_score) / float(
@@ -702,7 +702,7 @@ class SerialLegOpenChainRecoveryEnv(SerialLegOpenChainFlatEnv):
             return
         log = info.get("log", {})
         gate = self._upright_gate(gravity, gravity.shape[0])
-        tilt_deg = np.rad2deg(np.arccos(np.clip(-gravity[:, 2], -1.0, 1.0)))
+        tilt_deg = np.rad2deg(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0)))
         base_contact = np.asarray(
             info.get("base_contact_force", np.zeros((gravity.shape[0],))), dtype=get_global_dtype()
         )
